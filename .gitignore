@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Arquivos gerados ao converter (nunca publique executaveis de jogos)
+*.f16c-backup
+*.f16c-tmp
+*.f16c-report.json
+*_f16c.exe
+*.exe
+!python/python.exe
+*.zip
+!python/python313.zip
