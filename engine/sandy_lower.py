@@ -9,25 +9,29 @@ Follows the exact contract of bmi2_lower.lower() and avx2_lower.lower():
   pushed by the stub wrapper.
 - Emits only baseline x86-64, SSE2, SSE4.1, and 128/256-bit AVX1 instructions.
 
-Ultra Optimizations:
-1. FMA3 Zero-Scratch Fast Path (covers >82% of all FMA instructions in games like FF7 Rebirth):
-   When destination does not clobber the additive operand before use, emits 2 to 3 AVX1
-   instructions directly with ZERO stack frame and ZERO register spills!
-   When destination aliases the additive operand, spills only ONE scratch YMM (32B) instead of 3 (96B).
+Ultra 3.0 (every path verified bit-exact by tests/native/test_lowering.py on real hardware):
+1. FMA3, exact operand semantics for all 132/213/231 forms, PS/PD/SS/SD, xmm/ymm:
+   - dst is a multiplicand (132/213): 2-3 AVX1 ops, zero scratch, zero stack.
+   - dst is the addend (231 accumulate, "acc += a*b"): the addend is parked in a
+     4..32 byte stack slot instead of saving a whole YMM scratch.
+   - Negations (FNMADD/FNMSUB/FMSUBADD) XOR with a sign mask from the .fxcpt
+     constant pool; exact zero signs.
+   (2.x computed 2*a*b for packed 231 FMADD, 0 for 231 FMSUB, and corrupted the
+   upper lanes of scalar 213 FNMADD with a memory operand.)
 2. BMI1 ANDN In-Place & Zero-Stack Fast Paths:
    - When dst == src1 and src2 is a distinct register: emits `NOT dst; AND dst, src2` (4-5 bytes total,
      fitting IN-PLACE inside the 5-byte VEX ANDN instruction with zero jump overhead!).
    - When dst != src1 and dst != src2: emits `MOV dst, src1; NOT dst; AND dst, src2` (zero stack frame!).
-3. F16C VCVTPH2PS Vectorized SIMD Lowering:
-   Replaces the 8-iteration scalar bit-manipulation loop with branchless SIMD SSE4.1/AVX1 vector
-   instructions (`VPMOVZXWD`, `VPSLLD`, `VPSRLD`, `VPCMPEQD`, `VPADDD`, `VSUBPS`, `VBLENDVPS`),
-   achieving exact IEEE-754 compliance across all 65,536 FP16 values (including subnormals, +-0, Inf, NaN)
-   in ~15x fewer cycles!
-4. POPCNT SWAR Lowering:
-   Supports 16/32/64-bit POPCNT via parallel Hamming weight (SWAR) for older CPUs lacking POPCNT.
+3. F16C VCVTPH2PS branchless SIMD lowering with pooled constants (25 ops for xmm,
+   46 for ymm, 3-4 scratch YMMs). Exact for normals, subnormals, +-0, Inf and NaN
+   independent of DAZ/FTZ. (2.x converted every negative half incorrectly.)
+   VCVTPS2PH works again (2.x referenced a non-existent opcode and skipped it).
+4. POPCNT SWAR lowering with exact flags (ZF only; 2.x left PF set by parity).
+5. MOVBE 16-bit forms no longer change CF/OF (XCHG AL,AH instead of ROL AX,8).
 """
 from __future__ import annotations
 
+import struct
 import sys
 from pathlib import Path
 
@@ -325,8 +329,16 @@ def _lower_bmi1_lzcnt(ins: ix.Instruction, ip: int, external_stack_adjust: int) 
         emit(I.create_reg_u64(C.MOV_R64_IMM64, R.RDX, 0x0101010101010101))
         emit(I.create_reg_reg(C.IMUL_R64_RM64, R.RAX, R.RDX))
         emit(I.create_reg_i32(C.SHR_RM64_IMM8, R.RAX, 56))
-        # Set ZF=(RAX==0) and clear OF, CF, SF, AF, PF via TEST EAX, EAX
+        # POPCNT flags: ZF=(count==0), OF=CF=SF=AF=PF=0. TEST alone would set PF
+        # from the count's parity, so ZF goes through SAHF (count <= 64, AH is 0).
+        emit(I.create_reg_reg(C.XOR_R32_RM32, R.EDX, R.EDX))
         emit(I.create_reg_reg(C.TEST_RM32_R32, R.EAX, R.EAX))
+        emit(I.create_reg(C.SETE_RM8, R.DL))
+        emit(I.create_reg_i32(C.SHL_RM32_IMM8, R.EDX, 6))
+        emit(I.create_reg_reg(C.AND_R32_RM32, R.EDX, R.EDX))      # OF=0
+        emit(I.create_reg_reg(C.MOV_RM8_R8, R.AH, R.DL))
+        emit(I.create(C.SAHF))                                     # SF ZF AF PF CF
+        emit(I.create_reg_i32(C.MOV_R8_IMM8, R.AH, 0))
 
     if bits == 16:
         emit(I.create_mem_reg(C.MOV_RM16_R16, M(R.RSP, displ=result_slot, displ_size=1), R.AX))
@@ -367,7 +379,7 @@ def _lower_movbe(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> by
             emit(I.create_reg_reg(C.MOV_R64_RM64, R.RAX, s64))
 
         if bits == 16:
-            emit(I.create_reg_i32(C.ROL_RM16_IMM8, R.AX, 8))
+            emit(I.create_reg_reg(C.XCHG_RM8_R8, R.AL, R.AH))  # MOVBE leaves RFLAGS untouched
         elif bits == 32:
             emit(I.create_reg(C.BSWAP_R32, R.EAX))
         else:
@@ -411,7 +423,7 @@ def _lower_movbe(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> by
     mem = _mem_operand(emit, ins, R.RAX, total_adjust, bits // 8)
     if bits == 16:
         emit(I.create_reg_mem(C.MOV_R16_RM16, R.AX, mem))
-        emit(I.create_reg_i32(C.ROL_RM16_IMM8, R.AX, 8))
+        emit(I.create_reg_reg(C.XCHG_RM8_R8, R.AL, R.AH))  # MOVBE leaves RFLAGS untouched
         emit(I.create_mem_reg(C.MOV_RM16_R16, M(R.RSP, displ=8, displ_size=1), R.AX))
     elif bits == 32:
         emit(I.create_reg_mem(C.MOV_R32_RM32, R.EAX, mem))
@@ -428,29 +440,63 @@ def _lower_movbe(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> by
 
 
 # ---------------------------------------------------------------------------
-# FMA3 (Ultra-Optimized Zero-Scratch & Single-Scratch AVX1 expansion)
+# FMA3 (Ultra 3.0: exact-semantics AVX1 expansion with minimal state traffic)
 # ---------------------------------------------------------------------------
+#
+# Emulation contract: a*b is rounded, then the add/sub is rounded (two roundings
+# instead of FMA's one). Everything else is exact: operand order, lane
+# selection, preserved upper bits of scalar forms, zeroed bits [255:128] of
+# VEX.128 forms, and the sign of exact zero results.
+#
+# Operand roles per form: 132: a=dst b=src3 c=src2 | 213: a=src2 b=dst c=src3
+#                         231: a=src2 b=src3 c=dst
+#
+# Path A (c is not dst, so dst is a multiplicand): zero scratch, zero stack.
+#     vmul dst, dst, other ; vadd/vsub/vaddsub dst, dst, c
+# Path B (c is dst, e.g. the accumulate form "acc += a*b"): c is parked in a
+#     4..32 byte stack slot instead of saving and restoring a full YMM scratch.
+# Generic: one or two saved scratch YMMs (FMSUBADD, register aliasing, no pool).
+#
+# Negations use a sign-mask constant pool in .fxcpt (set by the patch builder
+# with set_constant_pool); without a pool the mask is built in a scratch.
+
+CONSTANTS: dict | None = None
+
+SIGN_POOL_BYTES = {
+    "ps": struct.pack("<8I", *([0x80000000] * 8)),
+    "pd": struct.pack("<4Q", *([1 << 63] * 4)),
+    "ss": struct.pack("<I", 0x80000000) + bytes(28),
+    "sd": struct.pack("<Q", 1 << 63) + bytes(24),
+    # VCVTPH2PS constants (per 32-bit lane)
+    "h2f_bias": struct.pack("<8I", *([0x38000000] * 8)),        # exponent rebias 15 -> 127
+    "h2f_magic": struct.pack("<8I", *([0x38800000] * 8)),       # 2^-14, subnormal magic
+    "h2f_norm_min": struct.pack("<8I", *([0x007FFFFF] * 8)),    # E > this <=> exponent != 0
+    "h2f_inf_min": struct.pack("<8I", *([0x0F7FFFFF] * 8)),     # E > this <=> exponent == 31
+    "h2f_nan_min": struct.pack("<8I", *([0x0F800000] * 8)),     # E > this <=> NaN
+    "h2f_qnan": struct.pack("<8I", *([0x00400000] * 8)),        # quiet bit
+}
+
+
+def set_constant_pool(pool: dict | None) -> None:
+    """pool maps 'ps'/'pd'/'ss'/'sd' to the absolute VA of SIGN_POOL_BYTES[key]."""
+    global CONSTANTS
+    CONSTANTS = dict(pool) if pool else None
+
+
+def _fma_parse(mname: str):
+    for prefix, kind in (("VFMADDSUB", "FMADDSUB"), ("VFMSUBADD", "FMSUBADD"), ("VFNMADD", "FNMADD"),
+                         ("VFNMSUB", "FNMSUB"), ("VFMADD", "FMADD"), ("VFMSUB", "FMSUB")):
+        if mname.startswith(prefix):
+            rest = mname[len(prefix):]
+            return kind, rest[:3], rest[3:]
+    raise LoweringError(f"Unsupported FMA instruction: {mname}")
+
 
 def _lower_fma(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> bytes:
     mname = MNEMONIC_NAMES.get(ins.mnemonic, "")
-    if not mname.startswith(("VFMADD", "VFMSUB", "VFNMADD", "VFNMSUB")):
-        raise LoweringError(f"Unsupported FMA instruction: {ins}")
-
-    if mname.startswith("VFMADDSUB"):
-        kind, rest = "FMADDSUB", mname[9:]
-    elif mname.startswith("VFMSUBADD"):
-        kind, rest = "FMSUBADD", mname[9:]
-    elif mname.startswith("VFNMADD"):
-        kind, rest = "FNMADD", mname[7:]
-    elif mname.startswith("VFNMSUB"):
-        kind, rest = "FNMSUB", mname[7:]
-    elif mname.startswith("VFMADD"):
-        kind, rest = "FMADD", mname[6:]
-    else:
-        kind, rest = "FMSUB", mname[6:]
-
-    order = rest[:3]   # "132", "213", "231"
-    suffix = rest[3:]  # "PS", "PD", "SS", "SD"
+    kind, order, suffix = _fma_parse(mname)
+    if order not in ("132", "213", "231") or suffix not in ("PS", "PD", "SS", "SD"):
+        raise LoweringError(f"Unsupported FMA form: {ins}")
     is_scalar = suffix in ("SS", "SD")
     is_double = suffix in ("PD", "SD")
     wide = (not is_scalar) and (R.YMM0 <= ins.op0_register <= R.YMM15)
@@ -458,272 +504,180 @@ def _lower_fma(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> byte
     def vreg(x):
         return _ymm(x) if wide else _xmm(x)
 
-    w_tag = "YMM_YMM_YMMM256" if wide else ("XMM_XMM_XMMM128" if not is_scalar else ("XMM_XMM_XMMM64" if is_double else "XMM_XMM_XMMM32"))
-    vmul = getattr(C, f"VEX_VMUL{suffix}_{w_tag}")
-    vadd = getattr(C, f"VEX_VADD{suffix}_{w_tag}")
-    vsub = getattr(C, f"VEX_VSUB{suffix}_{w_tag}")
+    pshape = "YMM_YMM_YMMM256" if wide else "XMM_XMM_XMMM128"
+    shape = pshape if not is_scalar else ("XMM_XMM_XMMM64" if is_double else "XMM_XMM_XMMM32")
+    vmul = getattr(C, f"VEX_VMUL{suffix}_{shape}")
+    vadd = getattr(C, f"VEX_VADD{suffix}_{shape}")
+    vsub = getattr(C, f"VEX_VSUB{suffix}_{shape}")
+    vaddsub = None if is_scalar else getattr(C, f"VEX_VADDSUB{suffix}_{pshape}")
+    fp = "PD" if is_double else "PS"
+    vxor = getattr(C, f"VEX_VXOR{fp}_{pshape}")
+    mem_bytes = 32 if wide else (16 if not is_scalar else (8 if is_double else 4))
+    sign_addr = CONSTANTS.get(suffix.lower()) if CONSTANTS else None
 
     b = _Builder()
     emit = b.emit
 
+    def rrx(code, d, s1, s2):
+        if isinstance(s2, ix.MemoryOperand):
+            emit(I.create_reg_reg_mem(code, d, s1, s2))
+        else:
+            emit(I.create_reg_reg_reg(code, d, s1, s2))
+
+    def sign_operand():
+        return ix.MemoryOperand.ctor_u64(R.RIP, R.NONE, 1, sign_addr, 8, False, R.NONE)
+
     r1 = vreg(ins.op0_register)
     r2 = vreg(ins.op1_register)
+    op3_mem = ins.op2_kind == O.MEMORY
+    r3 = None if op3_mem else vreg(ins.op2_register)
 
-    # ULTRA FAST PATH 1: Register-only FMA with ZERO scratch registers and ZERO stack usage!
-    # Covers >90,500 sites in FF7 Rebirth (67.5% of all FMA instructions!).
-    # Note: For scalar SS/SD, VEX_VMULSS/SD dst, src1, src2 copies bits [127:32]/[127:64] from src1
-    # into dst! However, FMA3 scalar instructions architecturally preserve bits [127:32]/[127:64] of dst (r1)!
-    # Therefore:
-    # - For packed PS/PD: VMULPS r1, mul_a, mul_b writes all lanes of r1, so any mul_a/mul_b order is valid!
-    # - For scalar SS/SD: VMULSS r1, r1, other preserves r1[127:32] ONLY when the first source operand is r1!
-    #   Since multiplication is commutative (a * b == b * a), for order 132 (r1 * r3 + r2) and 213 (r2 * r1 + r3),
-    #   r1 IS one of the multiplicands! So we always put r1 as the first source operand of VMULSS/SD:
-    #     VMULSS/SD r1, r1, (r3 for 132 else r2) -> preserves r1[127:32]!
-    #   Then for FMADD (VADDSS r1, r1, add_c) and FMSUB (VSUBSS r1, r1, add_c), r1 is AGAIN the first source
-    #   operand, so r1[127:32] remains 100% preserved!
-    #   (For scalar 231 where r1 is add_c and not a multiplicand, or scalar FNMADD where VSUBSS has add_c first,
-    #    writing to r1 would take upper bits from r2/add_c; so scalar 231/FNMADD uses 1 scratch register below!)
-    if ins.op2_kind == O.REGISTER and kind in ("FMADD", "FMSUB", "FNMADD", "FMADDSUB"):
-        r3 = vreg(ins.op2_register)
-        can_zero_scratch = False
-        if not is_scalar:
-            if order == "132" and r1 != r2:
-                mul_a, mul_b, add_c = r1, r3, r2
-                can_zero_scratch = True
-            elif order == "213" and r1 != r3:
-                mul_a, mul_b, add_c = r1, r2, r3
-                can_zero_scratch = True
-            elif order == "231" and r1 != r2 and r1 != r3:
-                mul_a, mul_b, add_c = r2, r3, r1
-                can_zero_scratch = True
-        else:
-            # Scalar SS/SD: r1 must be first source operand of both VMUL and VADD/VSUB to preserve bits [127:32]/[127:64]
-            if kind in ("FMADD", "FMSUB"):
-                if order == "132" and r1 != r2:
-                    mul_a, mul_b, add_c = r1, r3, r2
-                    can_zero_scratch = True
-                elif order == "213" and r1 != r3:
-                    mul_a, mul_b, add_c = r1, r2, r3
-                    can_zero_scratch = True
+    def op3(adjust):
+        return _mem_operand(emit, ins, None, adjust, mem_bytes) if op3_mem else r3
 
-        if can_zero_scratch:
-            emit(I.create_reg_reg_reg(vmul, r1, mul_a, mul_b))
+    c_is_r1 = order == "231" or (order == "132" and r2 == r1) or (order == "213" and r3 == r1)
+
+    if not c_is_r1:
+        # ---- Path A: dst is a multiplicand and c is another register/memory ----
+        c_reg = r2 if order == "132" else r3          # None when c is memory (213 + mem)
+        ok = kind in ("FMADD", "FMSUB", "FMADDSUB") \
+            or (kind == "FNMADD" and ((not is_scalar and c_reg is not None) or sign_addr)) \
+            or (kind == "FNMSUB" and sign_addr)
+        if ok:
+            adj = external_stack_adjust
+            if order == "132":
+                rrx(vmul, r1, r1, op3(adj))
+                c = r2
+            else:
+                emit(I.create_reg_reg_reg(vmul, r1, r1, r2))
+                c = op3(adj)
             if kind == "FMADD":
-                emit(I.create_reg_reg_reg(vadd, r1, r1, add_c))
+                rrx(vadd, r1, r1, c)
             elif kind == "FMSUB":
-                emit(I.create_reg_reg_reg(vsub, r1, r1, add_c))
-            elif kind == "FNMADD":
-                emit(I.create_reg_reg_reg(vsub, r1, add_c, r1))
+                rrx(vsub, r1, r1, c)
             elif kind == "FMADDSUB":
-                vaddsub = getattr(C, f"VEX_VADDSUB{suffix}_{'YMM_YMM_YMMM256' if wide else 'XMM_XMM_XMMM128'}")
-                emit(I.create_reg_reg_reg(vaddsub, r1, r1, add_c))
+                rrx(vaddsub, r1, r1, c)
+            elif kind == "FNMADD" and not is_scalar and c_reg is not None:
+                emit(I.create_reg_reg_reg(vsub, r1, c_reg, r1))
+            else:  # FNMADD = (-p) + c ; FNMSUB = (-p) - c  (exact zero signs)
+                emit(I.create_reg_reg_mem(vxor, r1, r1, sign_operand()))
+                rrx(vadd if kind == "FNMADD" else vsub, r1, r1, c)
+            return b.encode(ip)
+    else:
+        # ---- Path B: c is dst (accumulate forms); park c in a small stack slot ---
+        a = r1 if order == "132" else r2
+        bop_reg = r1 if order == "213" else r3        # None when b is memory
+        ok = kind in ("FMADD", "FMSUB", "FMADDSUB") \
+            or (kind in ("FNMADD", "FNMSUB") and sign_addr) \
+            or (kind == "FMSUBADD" and sign_addr and a != r1 and bop_reg != r1)
+        if ok:
+            frame = 32 if wide else 16
+            total = frame + external_stack_adjust
+            slot = M(R.RSP)
+            b_op = op3(total) if order != "213" else r1
+            emit(I.create_reg_mem(C.LEA_R64_M, R.RSP, M(R.RSP, displ=-frame, displ_size=1)))
+            if kind == "FMSUBADD":
+                emit(I.create_reg_reg_mem(vxor, r1, r1, sign_operand()))
+            if is_scalar:
+                emit(I.create_mem_reg(C.VEX_VMOVSD_M64_XMM if is_double else C.VEX_VMOVSS_M32_XMM, slot, r1))
+                if a != r1:
+                    emit(I.create_reg_reg_reg(C.VEX_VMOVSD_XMM_XMM_XMM if is_double else C.VEX_VMOVSS_XMM_XMM_XMM,
+                                              r1, r1, a))
+                    if not isinstance(b_op, ix.MemoryOperand) and b_op == r1:
+                        b_op = slot
+                rrx(vmul, r1, r1, b_op)
+            else:
+                store = getattr(C, f"VEX_VMOVUP{'D' if is_double else 'S'}_{'YMMM256_YMM' if wide else 'XMMM128_XMM'}")
+                emit(I.create_mem_reg(store, slot, r1))
+                rrx(vmul, r1, a, b_op)
+            if kind in ("FNMADD", "FNMSUB"):
+                emit(I.create_reg_reg_mem(vxor, r1, r1, sign_operand()))
+            combine = {"FMADD": vadd, "FMSUB": vsub, "FMADDSUB": vaddsub, "FNMADD": vadd,
+                       "FNMSUB": vsub, "FMSUBADD": vaddsub}[kind]
+            emit(I.create_reg_reg_mem(combine, r1, r1, slot))
+            emit(I.create_reg_mem(C.LEA_R64_M, R.RSP, M(R.RSP, displ=frame, displ_size=1)))
             return b.encode(ip)
 
-    # ULTRA FAST PATH 2: Memory-operand FMA with ZERO scratch registers and ZERO stack usage!
-    # Covers ~18,900 additional sites in FF7 Rebirth!
-    if ins.op2_kind == O.MEMORY and not ins.is_ip_rel_memory_operand and kind in ("FMADD", "FMSUB", "FNMADD", "FMADDSUB"):
-        mem_bytes = 32 if wide else (16 if not is_scalar else (8 if is_double else 4))
-        can_mem_zero = False
-        if not is_scalar:
-            if order == "132" and r1 != r2:
-                # r1 = r1 * mem +/- r2
-                mem = _mem_operand(emit, ins, None, external_stack_adjust, mem_bytes)
-                emit(I.create_reg_reg_mem(vmul, r1, r1, mem))
-                if kind == "FMADD":
-                    emit(I.create_reg_reg_reg(vadd, r1, r1, r2))
-                elif kind == "FMSUB":
-                    emit(I.create_reg_reg_reg(vsub, r1, r1, r2))
-                elif kind == "FNMADD":
-                    emit(I.create_reg_reg_reg(vsub, r1, r2, r1))
-                elif kind == "FMADDSUB":
-                    vaddsub = getattr(C, f"VEX_VADDSUB{suffix}_{'YMM_YMM_YMMM256' if wide else 'XMM_XMM_XMMM128'}")
-                    emit(I.create_reg_reg_reg(vaddsub, r1, r1, r2))
-                return b.encode(ip)
-            elif order == "213" and kind in ("FMADD", "FMSUB", "FMADDSUB"):
-                # r1 = r2 * r1 +/- mem
-                mem = _mem_operand(emit, ins, None, external_stack_adjust, mem_bytes)
-                emit(I.create_reg_reg_reg(vmul, r1, r1, r2))
-                if kind == "FMADD":
-                    emit(I.create_reg_reg_mem(vadd, r1, r1, mem))
-                elif kind == "FMSUB":
-                    emit(I.create_reg_reg_mem(vsub, r1, r1, mem))
-                elif kind == "FMADDSUB":
-                    vaddsub = getattr(C, f"VEX_VADDSUB{suffix}_{'YMM_YMM_YMMM256' if wide else 'XMM_XMM_XMMM128'}")
-                    emit(I.create_reg_reg_mem(vaddsub, r1, r1, mem))
-                return b.encode(ip)
-        else:
-            # Scalar SS/SD with memory operand
-            if order == "132" and r1 != r2 and kind in ("FMADD", "FMSUB"):
-                mem = _mem_operand(emit, ins, None, external_stack_adjust, mem_bytes)
-                emit(I.create_reg_reg_mem(vmul, r1, r1, mem))
-                emit(I.create_reg_reg_reg(vadd if kind == "FMADD" else vsub, r1, r1, r2))
-                return b.encode(ip)
-            elif order == "213" and kind in ("FMADD", "FMSUB"):
-                mem = _mem_operand(emit, ins, None, external_stack_adjust, mem_bytes)
-                emit(I.create_reg_reg_reg(vmul, r1, r1, r2))
-                emit(I.create_reg_reg_mem(vadd if kind == "FMADD" else vsub, r1, r1, mem))
-                return b.encode(ip)
-
-    # ULTRA FAST PATH 3: Single-Scratch FMA (32-byte frame instead of 96-byte frame!)
-    # Used for scalar 231, scalar FNMADD, or when r1 aliases add_c.
+    # ---- Generic exact path: product in a saved scratch -----------------------
     used_xmms = {
         _xmm(ins.op_register(n))
         for n in range(ins.op_count)
         if ins.op_kind(n) == O.REGISTER and R.XMM0 <= ins.op_register(n) <= R.YMM15
     }
-    free_xmms = [R.XMM0 + i for i in range(16) if (R.XMM0 + i) not in used_xmms]
+    free = [R.XMM0 + i for i in range(16) if (R.XMM0 + i) not in used_xmms]
+    c_is_mem = order == "213" and op3_mem
+    needs_neg = kind == "FNMSUB" or (kind == "FNMADD" and c_is_mem)
+    use_t2 = kind == "FMSUBADD" or (needs_neg and not sign_addr)
+    use_t3 = kind == "FMSUBADD" and c_is_mem and not sign_addr
+    scratch = free[:3 if use_t3 else (2 if use_t2 else 1)]
+    t, t2 = vreg(scratch[0]), (vreg(scratch[1]) if use_t2 else None)
+    frame = 32 * len(scratch)
+    total = frame + external_stack_adjust
+    emit(I.create_reg_mem(C.LEA_R64_M, R.RSP, M(R.RSP, displ=-frame, displ_size=1)))
+    for n, reg in enumerate(scratch):
+        emit(I.create_mem_reg(C.VEX_VMOVDQU_YMMM256_YMM, M(R.RSP, displ=32 * n, displ_size=1), _ymm(reg)))
 
-    if kind in ("FMADD", "FMSUB", "FNMADD", "FMADDSUB") and not (ins.op2_kind == O.MEMORY and ins.is_ip_rel_memory_operand):
-        t0 = free_xmms[0]
-        frame = 32
-        total_adjust = frame + external_stack_adjust
-        emit(I.create_reg_mem(C.LEA_R64_M, R.RSP, M(R.RSP, displ=-frame, displ_size=1)))
-        emit(I.create_mem_reg(C.VEX_VMOVDQU_YMMM256_YMM, M(R.RSP, displ=0, displ_size=1), _ymm(t0)))
-
-        dst_t0 = vreg(t0)
-        if ins.op2_kind == O.REGISTER:
-            r3 = vreg(ins.op2_register)
-            if order == "132":
-                mul_a, mul_b, add_c = r1, r3, r2
-            elif order == "213":
-                mul_a, mul_b, add_c = r2, r1, r3
-            else:
-                mul_a, mul_b, add_c = r2, r3, r1
-            emit(I.create_reg_reg_reg(vmul, dst_t0, mul_a, mul_b))
-            if kind == "FMADD":
-                emit(I.create_reg_reg_reg(vadd, dst_t0, dst_t0, add_c))
-            elif kind == "FMSUB":
-                emit(I.create_reg_reg_reg(vsub, dst_t0, dst_t0, add_c))
-            elif kind == "FNMADD":
-                emit(I.create_reg_reg_reg(vsub, dst_t0, add_c, dst_t0))
-            elif kind == "FMADDSUB":
-                vaddsub = getattr(C, f"VEX_VADDSUB{suffix}_{'YMM_YMM_YMMM256' if wide else 'XMM_XMM_XMMM128'}")
-                emit(I.create_reg_reg_reg(vaddsub, dst_t0, dst_t0, add_c))
-        else:
-            mem_bytes = 32 if wide else (16 if not is_scalar else (8 if is_double else 4))
-            mem = _mem_operand(emit, ins, None, total_adjust, mem_bytes)
-            if order == "132":
-                emit(I.create_reg_reg_mem(vmul, dst_t0, r1, mem))
-                add_c = r2
-            elif order == "231":
-                emit(I.create_reg_reg_mem(vmul, dst_t0, r2, mem))
-                add_c = r1
-            else:  # "213" where kind == "FNMADD"
-                if is_scalar:
-                    load_code = C.VEX_VMOVSD_XMM_M64 if is_double else C.VEX_VMOVSS_XMM_M32
-                elif wide:
-                    load_code = C.VEX_VMOVUPD_YMM_YMMM256 if is_double else C.VEX_VMOVUPS_YMM_YMMM256
-                else:
-                    load_code = C.VEX_VMOVUPD_XMM_XMMM128 if is_double else C.VEX_VMOVUPS_XMM_XMMM128
-                emit(I.create_reg_mem(load_code, dst_t0, mem))
-                emit(I.create_reg_reg_reg(vmul, r1, r2, r1))
-                emit(I.create_reg_reg_reg(vsub, dst_t0, dst_t0, r1))
-                add_c = None
-
-            if add_c is not None:
-                if kind == "FMADD":
-                    emit(I.create_reg_reg_reg(vadd, dst_t0, dst_t0, add_c))
-                elif kind == "FMSUB":
-                    emit(I.create_reg_reg_reg(vsub, dst_t0, dst_t0, add_c))
-                elif kind == "FNMADD":
-                    emit(I.create_reg_reg_reg(vsub, dst_t0, add_c, dst_t0))
-                elif kind == "FMADDSUB":
-                    vaddsub = getattr(C, f"VEX_VADDSUB{suffix}_{'YMM_YMM_YMMM256' if wide else 'XMM_XMM_XMMM128'}")
-                    emit(I.create_reg_reg_reg(vaddsub, dst_t0, dst_t0, add_c))
-
-        if is_scalar:
-            ins_scalar = C.VEX_VMOVSD_XMM_XMM_XMM if is_double else C.VEX_VMOVSS_XMM_XMM_XMM
-            emit(I.create_reg_reg_reg(ins_scalar, _xmm(ins.op0_register), _xmm(ins.op0_register), _xmm(t0)))
-        elif wide:
-            emit(I.create_reg_reg(C.VEX_VMOVAPD_YMM_YMMM256, ins.op0_register, _ymm(t0)))
-        else:
-            emit(I.create_reg_reg(C.VEX_VMOVAPS_XMM_XMMM128, ins.op0_register, _xmm(t0)))
-
-        emit(I.create_reg_mem(C.VEX_VMOVDQU_YMM_YMMM256, _ymm(t0), M(R.RSP, displ=0, displ_size=1)))
-        emit(I.create_reg_mem(C.LEA_R64_M, R.RSP, M(R.RSP, displ=frame, displ_size=1)))
-        return b.encode(ip)
-
-    # Fallback full 3-scratch path (for FNMSUB, FMSUBADD, or RIP-relative memory operands)
-    t0, t1, t2 = free_xmms[0], free_xmms[1], free_xmms[2]
-    need_rax = ins.op2_kind == O.MEMORY and ins.is_ip_rel_memory_operand
-    frame = 96 + (16 if need_rax else 0)
-    total_adjust = frame + external_stack_adjust
-
-    emit(I.create_reg_mem(C.LEA_R64_M, R.RSP, M(R.RSP, displ=-frame, displ_size=_disp_size(-frame))))
-    for idx, xreg in enumerate((t0, t1, t2)):
-        emit(I.create_mem_reg(C.VEX_VMOVDQU_YMMM256_YMM, M(R.RSP, displ=idx * 32, displ_size=1), _ymm(xreg)))
-    if need_rax:
-        emit(I.create_mem_reg(C.MOV_RM64_R64, M(R.RSP, displ=96, displ_size=1), R.RAX))
-
-    if ins.op2_kind == O.REGISTER:
-        op2_reg = vreg(ins.op2_register)
-    else:
-        mem_bytes = 32 if wide else (16 if not is_scalar else (8 if is_double else 4))
-        mem = _mem_operand(emit, ins, R.RAX, total_adjust, mem_bytes)
-        if is_scalar:
-            load_code = C.VEX_VMOVSD_XMM_M64 if is_double else C.VEX_VMOVSS_XMM_M32
-        elif wide:
-            load_code = C.VEX_VMOVUPD_YMM_YMMM256 if is_double else C.VEX_VMOVUPS_YMM_YMMM256
-        else:
-            load_code = C.VEX_VMOVUPD_XMM_XMMM128 if is_double else C.VEX_VMOVUPS_XMM_XMMM128
-        emit(I.create_reg_mem(load_code, vreg(t1), mem))
-        op2_reg = vreg(t1)
-
-    r3 = op2_reg
-    if order == "132":
-        mul_a, mul_b, add_c = r1, r3, r2
-    elif order == "213":
-        mul_a, mul_b, add_c = r2, r1, r3
-    else:  # "231"
-        mul_a, mul_b, add_c = r2, r3, r1
-
-    dst_t0 = vreg(t0)
-    emit(I.create_reg_reg_reg(vmul, dst_t0, mul_a, mul_b))
-
-    def emit_sign_mask(target_xmm):
-        emit(I.create_reg_reg_reg(C.VEX_VPCMPEQD_XMM_XMM_XMMM128, target_xmm, target_xmm, target_xmm))
+    def build_mask(target):
+        x = _xmm(target)
+        emit(I.create_reg_reg_reg(C.VEX_VPCMPEQD_XMM_XMM_XMMM128, x, x, x))
         if is_double:
-            emit(I.create_reg_reg_i32(C.VEX_VPSLLQ_XMM_XMM_IMM8, target_xmm, target_xmm, 63))
+            emit(I.create_reg_reg_i32(C.VEX_VPSLLQ_XMM_XMM_IMM8, x, x, 63))
         else:
-            emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, target_xmm, target_xmm, 31))
+            emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, x, x, 31))
         if wide:
-            emit(I.create_reg_reg_reg_i32(C.VEX_VINSERTF128_YMM_YMM_XMMM128_IMM8,
-                                          _ymm(target_xmm), _ymm(target_xmm), target_xmm, 1))
+            emit(I.create_reg_reg_reg_i32(C.VEX_VINSERTF128_YMM_YMM_XMMM128_IMM8, _ymm(x), _ymm(x), x, 1))
 
+    if order == "132":
+        rrx(vmul, t, r1, op3(total))
+        c = r2
+    elif order == "213":
+        emit(I.create_reg_reg_reg(vmul, t, r2, r1))
+        c = op3(total)
+    else:
+        rrx(vmul, t, r2, op3(total))
+        c = r1
     if kind == "FMADD":
-        emit(I.create_reg_reg_reg(vadd, dst_t0, dst_t0, add_c))
+        rrx(vadd, t, t, c)
     elif kind == "FMSUB":
-        emit(I.create_reg_reg_reg(vsub, dst_t0, dst_t0, add_c))
-    elif kind == "FNMADD":
-        emit(I.create_reg_reg_reg(vsub, dst_t0, add_c, dst_t0))
-    elif kind == "FNMSUB":
-        emit(I.create_reg_reg_reg(vadd, dst_t0, dst_t0, add_c))
-        emit_sign_mask(t2)
-        vxor = getattr(C, f"VEX_VXOR{'PD' if is_double else 'PS'}_{'YMM_YMM_YMMM256' if wide else 'XMM_XMM_XMMM128'}")
-        emit(I.create_reg_reg_reg(vxor, dst_t0, dst_t0, vreg(t2)))
+        rrx(vsub, t, t, c)
     elif kind == "FMADDSUB":
-        vaddsub = getattr(C, f"VEX_VADDSUB{suffix}_{'YMM_YMM_YMMM256' if wide else 'XMM_XMM_XMMM128'}")
-        emit(I.create_reg_reg_reg(vaddsub, dst_t0, dst_t0, add_c))
-    elif kind == "FMSUBADD":
-        emit_sign_mask(t2)
-        vxor = getattr(C, f"VEX_VXOR{'PD' if is_double else 'PS'}_{'YMM_YMM_YMMM256' if wide else 'XMM_XMM_XMMM128'}")
-        emit(I.create_reg_reg_reg(vxor, vreg(t2), add_c, vreg(t2)))
-        vaddsub = getattr(C, f"VEX_VADDSUB{suffix}_{'YMM_YMM_YMMM256' if wide else 'XMM_XMM_XMMM128'}")
-        emit(I.create_reg_reg_reg(vaddsub, dst_t0, dst_t0, vreg(t2)))
+        rrx(vaddsub, t, t, c)
+    elif kind == "FNMADD" and not c_is_mem:
+        emit(I.create_reg_reg_reg(vsub, t, c, t))
+    elif kind in ("FNMADD", "FNMSUB"):
+        if sign_addr:
+            emit(I.create_reg_reg_mem(vxor, t, t, sign_operand()))
+        else:
+            build_mask(t2)
+            emit(I.create_reg_reg_reg(vxor, t, t, t2))
+        rrx(vadd if kind == "FNMADD" else vsub, t, t, c)
+    else:  # FMSUBADD = addsub(p, -c)
+        if c_is_mem:
+            load = getattr(C, f"VEX_VMOVUP{'D' if is_double else 'S'}_{'YMM_YMMM256' if wide else 'XMM_XMMM128'}")
+            emit(I.create_reg_mem(load, t2, c))
+            if sign_addr:
+                emit(I.create_reg_reg_mem(vxor, t2, t2, sign_operand()))
+            else:
+                t3 = vreg(scratch[2])
+                build_mask(t3)
+                emit(I.create_reg_reg_reg(vxor, t2, t2, t3))
+        elif sign_addr:
+            emit(I.create_reg_reg_mem(vxor, t2, c, sign_operand()))
+        else:
+            build_mask(t2)
+            emit(I.create_reg_reg_reg(vxor, t2, t2, c))
+        emit(I.create_reg_reg_reg(vaddsub, t, t, t2))
 
     if is_scalar:
-        ins_scalar = C.VEX_VMOVSD_XMM_XMM_XMM if is_double else C.VEX_VMOVSS_XMM_XMM_XMM
-        emit(I.create_reg_reg_reg(ins_scalar, _xmm(ins.op0_register), _xmm(ins.op0_register), _xmm(t0)))
+        emit(I.create_reg_reg_reg(C.VEX_VMOVSD_XMM_XMM_XMM if is_double else C.VEX_VMOVSS_XMM_XMM_XMM,
+                                  _xmm(ins.op0_register), _xmm(ins.op0_register), _xmm(t)))
     elif wide:
-        emit(I.create_reg_reg(C.VEX_VMOVAPD_YMM_YMMM256, ins.op0_register, _ymm(t0)))
+        emit(I.create_reg_reg(C.VEX_VMOVAPS_YMM_YMMM256, ins.op0_register, t))
     else:
-        emit(I.create_reg_reg(C.VEX_VMOVAPS_XMM_XMMM128, ins.op0_register, _xmm(t0)))
-
-    if need_rax:
-        emit(I.create_reg_mem(C.MOV_R64_RM64, R.RAX, M(R.RSP, displ=96, displ_size=1)))
-    for idx, xreg in enumerate((t0, t1, t2)):
-        emit(I.create_reg_mem(C.VEX_VMOVDQU_YMM_YMMM256, _ymm(xreg), M(R.RSP, displ=idx * 32, displ_size=1)))
-    emit(I.create_reg_mem(C.LEA_R64_M, R.RSP, M(R.RSP, displ=frame, displ_size=_disp_size(frame))))
+        emit(I.create_reg_reg(C.VEX_VMOVAPS_XMM_XMMM128, ins.op0_register, t))
+    for n, reg in enumerate(scratch):
+        emit(I.create_reg_mem(C.VEX_VMOVDQU_YMM_YMMM256, _ymm(reg), M(R.RSP, displ=32 * n, displ_size=1)))
+    emit(I.create_reg_mem(C.LEA_R64_M, R.RSP, M(R.RSP, displ=frame, displ_size=1)))
     return b.encode(ip)
 
 
@@ -731,52 +685,71 @@ def _lower_fma(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> byte
 # F16C (VCVTPH2PS Vectorized SIMD & VCVTPS2PH)
 # ---------------------------------------------------------------------------
 
-def _emit_ph2ps_4lanes_simd(emit, x_in, t1, t2, t3, t4):
-    """Convert 4 packed FP16 values in the low 64 bits of x_in to 4 packed FP32 values in x_in.
-    Pure branchless SSE4.1/AVX1 SIMD! Zero branches, zero flags modified, zero GPRs used!
-    Exact IEEE-754 match across all 65,536 FP16 values (normals, subnormals, +-0, Inf, NaN)."""
-    # Zero-extend 4 x uint16 -> 4 x uint32
-    emit(I.create_reg_reg(C.VEX_VPMOVZXWD_XMM_XMMM64, x_in, x_in))
-    # t1 = sign bit: (x_in >> 15) << 31
-    emit(I.create_reg_reg_i32(C.VEX_VPSRLD_XMM_XMM_IMM8, t1, x_in, 15))
-    emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, t1, t1, 31))
-    # t2 = (x_in << 16) >> 3  == (exp_mant << 13) with sign cleared
-    emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, t2, x_in, 16))
-    emit(I.create_reg_reg_i32(C.VEX_VPSRLD_XMM_XMM_IMM8, t2, t2, 3))
-    # t3 = (x_in >> 10) & 0x1F (5-bit exponent)
-    emit(I.create_reg_reg_i32(C.VEX_VPSRLD_XMM_XMM_IMM8, t3, x_in, 10))
-    emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, t3, t3, 27))
-    emit(I.create_reg_reg_i32(C.VEX_VPSRLD_XMM_XMM_IMM8, t3, t3, 27))
+def _lower_ph2ps_pool(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> bytes:
+    """VCVTPH2PS with pool constants: 3 scratch YMMs (4 for ymm), ~17 ops per 4 lanes.
 
-    # Construct 0x38800000 in t4 without GPRs:
-    # all_ones = VPCMPEQD(t4, t4); (all_ones << 27) >> 2 = 0x3E000000;
-    # Wait: let's construct 0x38000000 (7 << 27) and 0x38800000 (0x71 << 23):
-    # Even simpler:
-    # all_ones >> 29 = 7 -> (7 << 27) = 0x38000000!
-    emit(I.create_reg_reg_reg(C.VEX_VPCMPEQD_XMM_XMM_XMMM128, t4, t4, t4))
-    emit(I.create_reg_reg_i32(C.VEX_VPSRLD_XMM_XMM_IMM8, x_in, t4, 29))     # x_in = 7
-    emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, x_in, x_in, 27))   # x_in = 0x38000000
-    # Normal magnitude: t4_norm = t2 + 0x38000000
-    # Wait: we also need subnormal magic = 0x38800000 = 0x38000000 | (1 << 23)!
-    # (all_ones >> 31) << 23 = 0x00800000!
-    emit(I.create_reg_reg_i32(C.VEX_VPSRLD_XMM_XMM_IMM8, t4, t4, 31))       # t4 = 1
-    emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, t4, t4, 23))       # t4 = 0x00800000
-    emit(I.create_reg_reg_reg(C.VEX_VPOR_XMM_XMM_XMMM128, t4, t4, x_in))    # t4 = 0x38800000 (magic)
+    E = (h & 0x7FFF) << 13 ; normal = E + bias ; Inf/NaN = E + 2*bias (+quiet bit)
+    subnormal/zero = (E | magic) - magic (exact, independent of DAZ/FTZ) ; | sign"""
+    b = _Builder()
+    emit = b.emit
+    wide = R.YMM0 <= ins.op0_register <= R.YMM15
+    used = {_xmm(ins.op_register(n)) for n in range(ins.op_count)
+            if ins.op_kind(n) == O.REGISTER and R.XMM0 <= ins.op_register(n) <= R.YMM15}
+    free = [R.XMM0 + i for i in range(16) if (R.XMM0 + i) not in used]
+    scratch = free[:4 if wide else 3]
+    t1, t2, t3 = scratch[0], scratch[1], scratch[2]
+    frame = 32 * len(scratch)
+    total = frame + external_stack_adjust
 
-    # Compute Normal in x_in: x_in = t2 + 0x38000000
-    emit(I.create_reg_reg_reg(C.VEX_VPADDD_XMM_XMM_XMMM128, x_in, t2, x_in))
+    def k(key):
+        return ix.MemoryOperand.ctor_u64(R.RIP, R.NONE, 1, CONSTANTS[key], 8, False, R.NONE)
 
-    # If exp == 0 (subnormal or zero):
-    # sub = VSUBPS(t2 | 0x38800000, 0x38800000)
-    # Wait: we need mask_zero = (t3 == 0).
-    # Let's check: for normal numbers (1 <= exp <= 30), x_in already has the exact normal result!
-    # What if exp == 0? Then t2 has (mant << 13).
-    # What if we blend subnormal result when t3 == 0?
-    # Let's compute subnormal in t4:
-    # Wait: we need 0x38800000 twice for VSUBPS(t2 | 0x38800000, 0x38800000)!
-    # Since t2 for exp==0 has bits [31:23] == 0, (t2 + 0x38800000) == (t2 | 0x38800000)!
-    # And notice: x_in already equals t2 + 0x38000000!
-    # If we add 0x00800000 to x_in, we get t2 + 0x38800000!
+    def convert(x):
+        emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, t1, x, 17))
+        emit(I.create_reg_reg_i32(C.VEX_VPSRLD_XMM_XMM_IMM8, t1, t1, 4))           # E
+        emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, t2, x, 16))
+        emit(I.create_reg_reg_mem(C.VEX_VPAND_XMM_XMM_XMMM128, t2, t2, k("ps")))     # sign
+        emit(I.create_reg_reg_mem(C.VEX_VPADDD_XMM_XMM_XMMM128, x, t1, k("h2f_bias")))
+        emit(I.create_reg_reg_mem(C.VEX_VPCMPGTD_XMM_XMM_XMMM128, t3, t1, k("h2f_inf_min")))
+        emit(I.create_reg_reg_mem(C.VEX_VPAND_XMM_XMM_XMMM128, t3, t3, k("h2f_bias")))
+        emit(I.create_reg_reg_reg(C.VEX_VPADDD_XMM_XMM_XMMM128, x, x, t3))
+        emit(I.create_reg_reg_mem(C.VEX_VPCMPGTD_XMM_XMM_XMMM128, t3, t1, k("h2f_nan_min")))
+        emit(I.create_reg_reg_mem(C.VEX_VPAND_XMM_XMM_XMMM128, t3, t3, k("h2f_qnan")))
+        emit(I.create_reg_reg_reg(C.VEX_VPOR_XMM_XMM_XMMM128, x, x, t3))
+        emit(I.create_reg_reg_mem(C.VEX_VPOR_XMM_XMM_XMMM128, t3, t1, k("h2f_magic")))
+        emit(I.create_reg_reg_mem(C.VEX_VSUBPS_XMM_XMM_XMMM128, t3, t3, k("h2f_magic")))
+        emit(I.create_reg_reg_mem(C.VEX_VPCMPGTD_XMM_XMM_XMMM128, t1, t1, k("h2f_norm_min")))
+        emit(I.create_reg_reg_reg_reg(C.VEX_VBLENDVPS_XMM_XMM_XMMM128_XMM, x, t3, x, t1))
+        emit(I.create_reg_reg_reg(C.VEX_VPOR_XMM_XMM_XMMM128, x, x, t2))
+
+    emit(I.create_reg_mem(C.LEA_R64_M, R.RSP, M(R.RSP, displ=-frame, displ_size=_disp_size(-frame))))
+    for n, reg in enumerate(scratch):
+        emit(I.create_mem_reg(C.VEX_VMOVDQU_YMMM256_YMM, M(R.RSP, displ=32 * n, displ_size=_disp_size(32 * n)), _ymm(reg)))
+    dst_x = _xmm(ins.op0_register)
+    is_mem = ins.op1_kind == O.MEMORY
+    if not wide:
+        if is_mem:
+            emit(I.create_reg_mem(C.VEX_VPMOVZXWD_XMM_XMMM64, dst_x, _mem_operand(emit, ins, None, total, 8)))
+        else:
+            emit(I.create_reg_reg(C.VEX_VPMOVZXWD_XMM_XMMM64, dst_x, _xmm(ins.op1_register)))
+        convert(dst_x)
+    else:
+        lo = scratch[3]
+        if is_mem:
+            emit(I.create_reg_mem(C.VEX_VPMOVZXWD_XMM_XMMM64, lo, _mem_operand(emit, ins, None, total, 16)))
+            emit(I.create_reg_mem(C.VEX_VPMOVZXWD_XMM_XMMM64, dst_x, _mem_operand(emit, ins, None, total, 16, 8)))
+        else:
+            src = _xmm(ins.op1_register)
+            emit(I.create_reg_reg(C.VEX_VPMOVZXWD_XMM_XMMM64, lo, src))
+            emit(I.create_reg_reg_i32(C.VEX_VPSRLDQ_XMM_XMM_IMM8, dst_x, src, 8))
+            emit(I.create_reg_reg(C.VEX_VPMOVZXWD_XMM_XMMM64, dst_x, dst_x))
+        convert(dst_x)
+        convert(lo)
+        emit(I.create_reg_reg_reg_i32(C.VEX_VINSERTF128_YMM_YMM_XMMM128_IMM8, ins.op0_register, _ymm(lo), dst_x, 1))
+    for n, reg in enumerate(scratch):
+        emit(I.create_reg_mem(C.VEX_VMOVDQU_YMM_YMMM256, _ymm(reg), M(R.RSP, displ=32 * n, displ_size=_disp_size(32 * n))))
+    emit(I.create_reg_mem(C.LEA_R64_M, R.RSP, M(R.RSP, displ=frame, displ_size=_disp_size(frame))))
+    return b.encode(ip)
 
 
 def _lower_f16c(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> bytes:
@@ -787,8 +760,10 @@ def _lower_f16c(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> byt
     b = _Builder()
     emit = b.emit
 
+    if mname == "VCVTPH2PS" and CONSTANTS and "h2f_bias" in CONSTANTS:
+        return _lower_ph2ps_pool(ins, ip, external_stack_adjust)
     if mname == "VCVTPH2PS":
-        # Ultra-Fast Vectorized SIMD VCVTPH2PS (no RFLAGS save/restore, no GPR spills except RAX if RIP-rel!)
+        # Self-contained variant (no constant pool): builds its constants in registers.
         wide = R.YMM0 <= ins.op0_register <= R.YMM15
         used_xmms = {
             _xmm(ins.op_register(n))
@@ -806,7 +781,7 @@ def _lower_f16c(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> byt
         for idx, xreg in enumerate((s0, s1, s2, s3, s4)):
             emit(I.create_mem_reg(C.VEX_VMOVDQU_YMMM256_YMM, M(R.RSP, displ=idx * 32, displ_size=_disp_size(idx * 32)), _ymm(xreg)))
         if need_rax:
-            emit(I.create_mem_reg(C.MOV_RM64_R64, M(R.RSP, displ=160, displ_size=4), R.RAX))
+            emit(I.create_mem_reg(C.MOV_RM64_R64, M(R.RSP, displ=160, displ_size=8), R.RAX))
 
         # Load input FP16 vector into s0
         if ins.op1_kind == O.REGISTER:
@@ -826,9 +801,10 @@ def _lower_f16c(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> byt
             # s1 = sign = (x_vec >> 15) << 31
             emit(I.create_reg_reg_i32(C.VEX_VPSRLD_XMM_XMM_IMM8, s1, x_vec, 15))
             emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, s1, s1, 31))
-            # s2 = (exp_mant << 13) = (x_vec << 16) >> 3
-            emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, s2, x_vec, 16))
-            emit(I.create_reg_reg_i32(C.VEX_VPSRLD_XMM_XMM_IMM8, s2, s2, 3))
+            # s2 = (exp_mant << 13) = (x_vec << 17) >> 4  (shifting by 17 drops the sign bit;
+            # 2.x used << 16 >> 3, which left the sign in bit 28 and broke every negative half)
+            emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, s2, x_vec, 17))
+            emit(I.create_reg_reg_i32(C.VEX_VPSRLD_XMM_XMM_IMM8, s2, s2, 4))
             # s3 = exp_field = (s2 >> 23) << 23 = (x_vec & 0x7C00) << 13
             emit(I.create_reg_reg_i32(C.VEX_VPSRLD_XMM_XMM_IMM8, s3, s2, 23))
             emit(I.create_reg_reg_i32(C.VEX_VPSLLD_XMM_XMM_IMM8, s3, s3, 23))
@@ -935,7 +911,7 @@ def _lower_f16c(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> byt
                                           ins.op0_register, _ymm(s0), dst_x, 1))
 
         if need_rax:
-            emit(I.create_reg_mem(C.MOV_R64_RM64, R.RAX, M(R.RSP, displ=160, displ_size=4)))
+            emit(I.create_reg_mem(C.MOV_R64_RM64, R.RAX, M(R.RSP, displ=160, displ_size=8)))
         for idx, xreg in enumerate((s0, s1, s2, s3, s4)):
             emit(I.create_reg_mem(C.VEX_VMOVDQU_YMM_YMMM256, _ymm(xreg), M(R.RSP, displ=idx * 32, displ_size=_disp_size(idx * 32))))
         emit(I.create_reg_mem(C.LEA_R64_M, R.RSP, M(R.RSP, displ=frame, displ_size=_disp_size(frame))))
@@ -1008,24 +984,24 @@ def _lower_f16c(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> byt
     b.branch(C.JB_REL32_64, "ps2ph_norm_post_rnd")
     b.branch(C.JA_REL32_64, "ps2ph_norm_inc")
     emit(I.create_reg_i32(C.TEST_RM32_IMM32, R.EAX, 1))
-    b.branch(C.JZ_REL32_64, "ps2ph_norm_post_rnd")
+    b.branch(C.JE_REL32_64, "ps2ph_norm_post_rnd")
     b.label("ps2ph_norm_inc")
     emit(I.create_reg(C.INC_RM32, R.EAX))
     b.branch(C.JMP_REL32_64, "ps2ph_norm_post_rnd")
 
     b.label("ps2ph_norm_dir")
     emit(I.create_reg_reg(C.TEST_RM32_R32, R.EDX, R.EDX))
-    b.branch(C.JZ_REL32_64, "ps2ph_norm_post_rnd")
+    b.branch(C.JE_REL32_64, "ps2ph_norm_post_rnd")
     emit(I.create_reg_i32(C.CMP_RM32_IMM8, R.R8D, 3))
     b.branch(C.JE_REL32_64, "ps2ph_norm_post_rnd")
     emit(I.create_reg_i32(C.CMP_RM32_IMM8, R.R8D, 1))
     b.branch(C.JE_REL32_64, "ps2ph_norm_rtn")
     emit(I.create_reg_reg(C.TEST_RM32_R32, R.EBX, R.EBX))
-    b.branch(C.JZ_REL32_64, "ps2ph_norm_inc")
+    b.branch(C.JE_REL32_64, "ps2ph_norm_inc")
     b.branch(C.JMP_REL32_64, "ps2ph_norm_post_rnd")
     b.label("ps2ph_norm_rtn")
     emit(I.create_reg_reg(C.TEST_RM32_R32, R.EBX, R.EBX))
-    b.branch(C.JNZ_REL32_64, "ps2ph_norm_inc")
+    b.branch(C.JNE_REL32_64, "ps2ph_norm_inc")
 
     b.label("ps2ph_norm_post_rnd")
     emit(I.create_reg_i32(C.CMP_RM32_IMM32, R.EAX, 0x400))
@@ -1070,24 +1046,24 @@ def _lower_f16c(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> byt
     b.branch(C.JB_REL32_64, "ps2ph_pack_sign")
     b.branch(C.JA_REL32_64, "ps2ph_sub_inc")
     emit(I.create_reg_i32(C.TEST_RM32_IMM32, R.EAX, 1))
-    b.branch(C.JZ_REL32_64, "ps2ph_pack_sign")
+    b.branch(C.JE_REL32_64, "ps2ph_pack_sign")
     b.label("ps2ph_sub_inc")
     emit(I.create_reg(C.INC_RM32, R.EAX))
     b.branch(C.JMP_REL32_64, "ps2ph_pack_sign")
 
     b.label("ps2ph_sub_dir")
     emit(I.create_reg_reg(C.TEST_RM32_R32, R.EDX, R.EDX))
-    b.branch(C.JZ_REL32_64, "ps2ph_pack_sign")
+    b.branch(C.JE_REL32_64, "ps2ph_pack_sign")
     emit(I.create_reg_i32(C.CMP_RM32_IMM8, R.R8D, 3))
     b.branch(C.JE_REL32_64, "ps2ph_pack_sign")
     emit(I.create_reg_i32(C.CMP_RM32_IMM8, R.R8D, 1))
     b.branch(C.JE_REL32_64, "ps2ph_sub_rtn")
     emit(I.create_reg_reg(C.TEST_RM32_R32, R.EBX, R.EBX))
-    b.branch(C.JZ_REL32_64, "ps2ph_sub_inc")
+    b.branch(C.JE_REL32_64, "ps2ph_sub_inc")
     b.branch(C.JMP_REL32_64, "ps2ph_pack_sign")
     b.label("ps2ph_sub_rtn")
     emit(I.create_reg_reg(C.TEST_RM32_R32, R.EBX, R.EBX))
-    b.branch(C.JNZ_REL32_64, "ps2ph_sub_inc")
+    b.branch(C.JNE_REL32_64, "ps2ph_sub_inc")
     b.branch(C.JMP_REL32_64, "ps2ph_pack_sign")
 
     b.label("ps2ph_overflow")
@@ -1098,11 +1074,11 @@ def _lower_f16c(ins: ix.Instruction, ip: int, external_stack_adjust: int) -> byt
     emit(I.create_reg_i32(C.CMP_RM32_IMM8, R.R8D, 1))
     b.branch(C.JE_REL32_64, "ps2ph_ovf_rtn")
     emit(I.create_reg_reg(C.TEST_RM32_R32, R.EBX, R.EBX))
-    b.branch(C.JZ_REL32_64, "ps2ph_ovf_inf")
+    b.branch(C.JE_REL32_64, "ps2ph_ovf_inf")
     b.branch(C.JMP_REL32_64, "ps2ph_ovf_max")
     b.label("ps2ph_ovf_rtn")
     emit(I.create_reg_reg(C.TEST_RM32_R32, R.EBX, R.EBX))
-    b.branch(C.JNZ_REL32_64, "ps2ph_ovf_inf")
+    b.branch(C.JNE_REL32_64, "ps2ph_ovf_inf")
     b.label("ps2ph_ovf_max")
     emit(I.create_reg_i32(C.MOV_R32_IMM32, R.EAX, 0x7BFF))
     b.branch(C.JMP_REL32_64, "ps2ph_pack_sign")

@@ -1,5 +1,5 @@
 @echo off
-title FX Reborn Toolkit Ultra v2.0 - Interface Grafica
+title FX Reborn Toolkit Ultra v3.0 - Interface Grafica
 cd /d "%~dp0"
 if exist "python\python.exe" (
     "python\python.exe" fxkit.py gui

@@ -1,7 +1,8 @@
 """Build an Ultra-Optimized patched copy of a PE (exe or dll):
 AVX2, BMI2, FMA3, F16C, BMI1, LZCNT, MOVBE (and optional POPCNT) sites lowered,
-with Multi-Instruction Basic-Block Fusion, 4-Byte Neighbor Stealing, Direct Jump Stubs,
-and cross-platform PE Checksum calculation.
+with CALL/RET stub linkage, Multi-Instruction Basic-Block Fusion, forward and
+backward neighbor stealing, a read-only constant pool in .fxcpt, and
+cross-platform PE Checksum calculation.
 
 Writes to STAGING and never touches the input file.
 """
@@ -29,6 +30,15 @@ import sandy_lower
 GAME = Path('.')
 STAGING = WORK / 'staging'
 STAGING.mkdir(exist_ok=True)
+
+
+# Intel-recommended multi-byte NOPs (one decoded instruction each).
+NOPS = {
+    1: bytes.fromhex('90'), 2: bytes.fromhex('6690'), 3: bytes.fromhex('0f1f00'),
+    4: bytes.fromhex('0f1f4000'), 5: bytes.fromhex('0f1f440000'), 6: bytes.fromhex('660f1f440000'),
+    7: bytes.fromhex('0f1f8000000000'), 8: bytes.fromhex('0f1f840000000000'),
+    9: bytes.fromhex('660f1f840000000000'),
+}
 
 
 def align(n: int, a: int) -> int:
@@ -117,6 +127,15 @@ class Builder:
         else:
             self.target_features = default_feats
         self.include_popcnt = ix.CpuidFeature.POPCNT in self.target_features
+        self._info = ix.InstructionInfoFactory()
+        self._boundary_cache = {}
+        self.prolog_end = {}
+
+        # Read-only constant pool at the start of .fxcpt (sign masks for FMA
+        # negations). Referenced RIP-relative, so it needs no relocations.
+        self.const_pool = {key: self.base + self.append(blob, 32)
+                           for key, blob in sandy_lower.SIGN_POOL_BYTES.items()}
+        sandy_lower.set_constant_pool(self.const_pool)
 
     def append(self, data: bytes, a: int = 1) -> int:
         pos = align(len(self.payload), a)
@@ -163,10 +182,12 @@ class Builder:
         cache_file = cache_dir / f'{digest}.padding.json'
         targets_file = cache_dir / f'{digest}.targets.json'
 
-        ranges = sorted(
-            (e.struct.BeginAddress, e.struct.EndAddress)
-            for e in getattr(self.pe, 'DIRECTORY_ENTRY_EXCEPTION', [])
-        )
+        entries = getattr(self.pe, 'DIRECTORY_ENTRY_EXCEPTION', [])
+        ranges = sorted((e.struct.BeginAddress, e.struct.EndAddress) for e in entries)
+        for e in entries:
+            info = getattr(e, 'unwindinfo', None)
+            if info is not None and hasattr(info, 'SizeOfProlog'):
+                self.prolog_end[e.struct.BeginAddress] = e.struct.BeginAddress + info.SizeOfProlog
         starts = [s for s, _ in ranges]
         self.pdata_ranges = ranges
         self.pdata_starts = starts
@@ -270,52 +291,55 @@ class Builder:
                     self.unwind_blobs[blob]
                 ))
 
-    def make_stub(self, ins_list: list[ix.Instruction], next_ip: int) -> int | None:
-        """Create a stub in .fxcpt for one or more consecutive instructions."""
-        start = self.rva + align(len(self.payload), 16)
-        cur_ip = self.base + start + 6
-        bodies = []
-        for ins in ins_list:
-            part = self.lower(ins, cur_ip, 8)
+    # ------------------------------------------------------------------ stubs
+    #
+    # Ultra 3.0 stub linkage. A patched site now reads `call stub` and the stub
+    # ends with a plain `ret`, so every stub exit is predicted by the CPU's
+    # return-stack buffer. The 2.x linkage (`jmp stub` + `push [lit]` ... `ret`)
+    # mispredicted on EVERY exit (~15-20 cycles each on Sandy Bridge / FX).
+    # The pushed return address (site+5) lies inside the original function, so
+    # stack walks and C++ exceptions inside a stub unwind exactly as before;
+    # lowered bodies still see an 8-byte external stack adjustment.
+    #
+    # 'pushret' linkage is kept where a CALL cannot be used: VEH redirects (the
+    # exception handler jumps to the stub) and padding caves (a return address
+    # inside inter-function padding would break unwinding).
+
+    def _body(self, items, body_ip: int) -> bytes | None:
+        out = bytearray()
+        for kind, ins in items:
+            ip = body_ip + len(out)
+            part = self.lower(ins, ip, 8) if kind == 'lower' else self.relocate(ins, ip, 8)
             if part is None:
                 return None
-            bodies.append(part)
-            cur_ip += len(part)
-        body = b''.join(bodies)
+            out += part
+        return bytes(out)
 
-        literal = start + 6 + len(body) + 1
-        prefix = b'\xff\x35' + struct.pack('<i', literal - (start + 6))
-        code = prefix + body + b'\xc3' + struct.pack('<Q', next_ip)
-        actual = self.append(code, 16)
-        assert actual == start
-        self.new_relocs.append((literal, 10))
-        self._validate_and_register_body(body, start + 6)
-        return start
+    def _check_body(self, body: bytes, body_ip: int):
+        for item in ix.Decoder(64, body, ip=body_ip):
+            if item.is_invalid:
+                raise RuntimeError('Invalid instruction in generated body')
+            if any(f in self.target_features or f == ix.CpuidFeature.AVX512F for f in item.cpuid_features()):
+                raise RuntimeError(f'Unsupported instruction remains in generated body: {item}')
 
-    def make_neighbor_stub(self, ins: ix.Instruction, neighbor_bytes: bytes,
-                           prepend_neighbor: bool, next_ip: int) -> int | None:
-        """Create a stub that includes a 4-byte lowered instruction AND an adjacent ordinary instruction."""
+    def make_stub(self, items, next_ip: int, linkage: str = 'call') -> int | None:
+        """Create a stub in .fxcpt. items: [('lower', ins) | ('reloc', ins), ...]."""
         start = self.rva + align(len(self.payload), 16)
-        if prepend_neighbor:
-            body_ip = self.base + start + 6 + len(neighbor_bytes)
-            lowered = self.lower(ins, body_ip, 8)
-            if lowered is None:
-                return None
-            body = neighbor_bytes + lowered
+        prefix = 0 if linkage == 'call' else 6
+        body = self._body(items, self.base + start + prefix)
+        if body is None:
+            return None
+        self._check_body(body, self.base + start + prefix)
+        if linkage == 'call':
+            code = body + b'\xc3'
         else:
-            body_ip = self.base + start + 6
-            lowered = self.lower(ins, body_ip, 8)
-            if lowered is None:
-                return None
-            body = lowered + neighbor_bytes
-
-        literal = start + 6 + len(body) + 1
-        prefix = b'\xff\x35' + struct.pack('<i', literal - (start + 6))
-        code = prefix + body + b'\xc3' + struct.pack('<Q', next_ip)
+            literal = start + 6 + len(body) + 1
+            code = b'\xff\x35' + struct.pack('<i', literal - (start + 6)) + body + b'\xc3' + struct.pack('<Q', next_ip)
         actual = self.append(code, 16)
         assert actual == start
-        self.new_relocs.append((literal, 10))
-        self._validate_and_register_body(body, start + 6)
+        if linkage != 'call':
+            self.new_relocs.append((literal, 10))
+        self._validate_and_register_body(body, start + prefix)
         return start
 
     def stack_neutral(self, body: bytes, ip: int) -> bool:
@@ -326,26 +350,57 @@ class Builder:
                 return False
         return True
 
+    # ------------------------------------------------------- neighbor moving
+
+    _RSP_REGS = (ix.Register.RSP, ix.Register.ESP, ix.Register.SP, ix.Register.SPL)
+
     def _is_safe_neighbor(self, neighbor: ix.Instruction) -> bool:
-        """Verify an ordinary adjacent instruction can be relocated into a stub unchanged."""
+        """An ordinary instruction that can run inside a stub after re-encoding.
+
+        RIP-relative operands are re-targeted by the encoder; [rsp+disp] operands
+        get +8 for the stub's return address. Anything else touching RSP, any
+        control flow, and anything we translate ourselves is refused."""
         if neighbor.is_invalid or neighbor.len <= 0:
             return False
         if neighbor.flow_control != ix.FlowControl.NEXT:
             return False
-        if neighbor.is_ip_rel_memory_operand:
-            return False
-        if neighbor.encoding == ix.EncodingKind.EVEX or neighbor.encoding == ix.EncodingKind.MVEX:
+        if neighbor.encoding in (ix.EncodingKind.EVEX, ix.EncodingKind.MVEX):
             return False
         if any(f in self.target_features or f == ix.CpuidFeature.AVX512F for f in neighbor.cpuid_features()):
             return False
         if neighbor.stack_pointer_increment != 0:
             return False
-        if neighbor.memory_base in (ix.Register.RSP, ix.Register.ESP):
-            return False
         for idx in range(neighbor.op_count):
-            if neighbor.op_kind(idx) == ix.OpKind.REGISTER and neighbor.op_register(idx) in (ix.Register.RSP, ix.Register.ESP):
+            if neighbor.op_kind(idx) == ix.OpKind.REGISTER and neighbor.op_register(idx) in self._RSP_REGS:
                 return False
-        return True
+        if neighbor.memory_index in self._RSP_REGS:
+            return False
+        rsp_base = neighbor.memory_base in self._RSP_REGS
+        if rsp_base:
+            if neighbor.memory_base != ix.Register.RSP or neighbor.memory_displacement >= 1 << 63:
+                return False   # no 32-bit stack addressing, nothing below RSP
+        reads = 0
+        for used in self._info.info(neighbor).used_registers():
+            if used.register in self._RSP_REGS:
+                if used.access != ix.OpAccess.READ:
+                    return False
+                reads += 1
+        return reads == (1 if rsp_base else 0)
+
+    def relocate(self, ins: ix.Instruction, new_ip: int, stack_adjust: int) -> bytes | None:
+        copy = ins.copy()
+        if copy.memory_base == ix.Register.RSP and stack_adjust:
+            disp = copy.memory_displacement + stack_adjust
+            if disp >= 1 << 31:
+                return None
+            copy.memory_displacement = disp
+            copy.memory_displ_size = 1 if disp <= 127 else 8
+        encoder = ix.BlockEncoder(64)
+        encoder.add(copy)
+        try:
+            return encoder.encode(new_ip)
+        except ValueError:
+            return None
 
     def _in_same_pdata_function(self, rva1: int, rva2_end: int) -> bool:
         self.prepare_caves()
@@ -355,6 +410,72 @@ class Builder:
         f_start, f_end = self.pdata_ranges[idx]
         return f_start <= rva1 and rva2_end <= f_end
 
+    def _function_of(self, rva: int):
+        idx = bisect.bisect_right(self.pdata_starts, rva) - 1
+        if idx < 0:
+            return None
+        f_start, f_end = self.pdata_ranges[idx]
+        return (f_start, f_end) if f_start <= rva < f_end else None
+
+    def _previous_instruction(self, rva: int) -> ix.Instruction | None:
+        """Instruction ending exactly at rva, by linear decode of its .pdata range."""
+        func = self._function_of(rva)
+        if func is None:
+            return None
+        f_start, f_end = func
+        starts = self._boundary_cache.get(f_start)
+        if starts is None:
+            if f_end - f_start > 1 << 20:
+                return None
+            raw = self.pe.get_data(f_start, f_end - f_start)
+            starts = [ins.ip - self.base for ins in ix.Decoder(64, raw, ip=self.base + f_start)]
+            if len(self._boundary_cache) > 4096:
+                self._boundary_cache.clear()
+            self._boundary_cache[f_start] = starts
+        idx = bisect.bisect_left(starts, rva)
+        if idx >= len(starts) or starts[idx] != rva or idx == 0:
+            return None
+        p_rva = starts[idx - 1]
+        if p_rva < self.prolog_end.get(f_start, f_start + 0xFF):
+            return None
+        raw = self.pe.get_data(p_rva, 15)
+        prev = ix.Decoder(64, raw, ip=self.base + p_rva).decode()
+        return prev if prev.next_ip == self.base + rva else None
+
+    # --------------------------------------------------------------- patches
+
+    @staticmethod
+    def filler(n: int) -> bytes:
+        """Bytes after a `call` that bring execution to the next instruction:
+        one multi-byte NOP for short gaps, a short jump for long ones."""
+        if n <= 0:
+            return b''
+        if n <= 9:
+            return NOPS[n]
+        if n - 2 <= 127:
+            return b'\xeb' + bytes([n - 2]) + b'\x90' * (n - 2)
+        return b'\xe9' + struct.pack('<i', n - 5) + b'\x90' * (n - 5)
+
+    @staticmethod
+    def nop_fill(n: int) -> bytes:
+        out = b''
+        while n > 0:
+            k = min(n, 9)
+            out += NOPS[k]
+            n -= k
+        return out
+
+    def call_patch(self, site_rva: int, stub: int, length: int) -> bytes:
+        return b'\xe8' + struct.pack('<i', stub - site_rva - 5) + self.filler(length - 5)
+
+    def _record(self, rva, ins, orig, patch, stub, cave, method):
+        self.records.append({
+            'rva': hex(rva), 'asm': self.fmt.format(ins),
+            'original': orig.hex(), 'patch': patch.hex(),
+            'stub_rva': hex(stub) if stub is not None else None,
+            'cave_rva': hex(cave) if cave is not None else None, 'method': method,
+        })
+
     def instructions(self):
         self.prepare_caves()
         seen = set()
@@ -363,6 +484,9 @@ class Builder:
 
         def overlaps_patch(rva_start: int, rva_end: int) -> bool:
             return any(rva_start < pe and pb < rva_end for pb, pe in patch_ranges)
+
+        def targets_in(lo: int, hi: int) -> bool:
+            return any(t in self.targets for t in range(lo, hi))
 
         for h in sorted(self.hits, key=lambda h: int(h['rva'], 16)):
             rva = int(h['rva'], 16)
@@ -381,6 +505,7 @@ class Builder:
 
         site_rvas = {rva for rva, _, _ in decoded_sites}
         consumed_rvas = set()
+        high_water = 0          # every original byte below this may already be patched
 
         # Pass 1: Check which sites can be lowered IN-PLACE (zero jump overhead!)
         inplace_ready = {}
@@ -390,7 +515,14 @@ class Builder:
             except Exception:
                 body = None
             if body is not None and len(body) <= ins.len and self.stack_neutral(body, ins.ip):
-                inplace_ready[rva] = body + b'\x90' * (ins.len - len(body))
+                inplace_ready[rva] = body + self.nop_fill(ins.len - len(body))
+
+        def needs_help(k: int) -> bool:
+            """Site k is a short (<5 byte) non-in-place site that fusion could rescue."""
+            return (0 <= k < n_sites
+                    and decoded_sites[k][1].len < 5
+                    and decoded_sites[k][0] not in inplace_ready
+                    and decoded_sites[k][0] not in consumed_rvas)
 
         # Pass 2: Group remaining sites into contiguous basic-block clusters when fusion is enabled
         i = 0
@@ -398,33 +530,24 @@ class Builder:
         while i < n_sites:
             rva, ins, orig_bytes = decoded_sites[i]
 
-            # Always prefer pure IN-PLACE replacement unless an adjacent 4-byte instruction needs this site to reach 5 bytes!
+            # Always prefer pure IN-PLACE replacement unless an adjacent short site needs this one to reach 5 bytes.
             if rva in inplace_ready:
-                # Check if next or previous site is a 4-byte non-in-place instruction that needs fusion to avoid VEH!
                 prev_needs_help = (
-                    self.enable_fusion and i > 0
-                    and decoded_sites[i - 1][0] not in consumed_rvas
+                    self.enable_fusion and needs_help(i - 1)
                     and decoded_sites[i - 1][0] + decoded_sites[i - 1][1].len == rva
-                    and decoded_sites[i - 1][1].len < 5
-                    and decoded_sites[i - 1][0] not in inplace_ready
                     and rva not in self.targets
                 )
                 next_needs_help = (
-                    self.enable_fusion and i + 1 < n_sites
+                    self.enable_fusion and needs_help(i + 1)
                     and rva + ins.len == decoded_sites[i + 1][0]
-                    and decoded_sites[i + 1][1].len < 5
-                    and decoded_sites[i + 1][0] not in inplace_ready
                     and decoded_sites[i + 1][0] not in self.targets
                 )
                 if not prev_needs_help and not next_needs_help:
                     patch = inplace_ready[rva]
                     self.store(rva, patch)
                     consumed_rvas.add(rva)
-                    self.records.append({
-                        'rva': hex(rva), 'asm': self.fmt.format(ins),
-                        'original': orig_bytes.hex(), 'patch': patch.hex(),
-                        'stub_rva': None, 'cave_rva': None, 'method': 'in_place'
-                    })
+                    high_water = max(high_water, rva + ins.len)
+                    self._record(rva, ins, orig_bytes, patch, None, None, 'in_place')
                     i += 1
                     continue
 
@@ -440,14 +563,12 @@ class Builder:
                     # Never fuse across a known branch/relocation/pdata target boundary!
                     if nxt_rva in self.targets:
                         break
-                    # If the current cluster is already >= 5 bytes and nxt_rva can be done in-place (and doesn't help a following 4-byte site), stop cluster here so nxt_rva stays in-place!
+                    # Stop once the cluster can hold a call if the next site can stay in place.
                     cluster_bytes = sum(x[1].len for x in cluster)
                     if cluster_bytes >= 5 and nxt_rva in inplace_ready:
                         after_needs_help = (
-                            j + 1 < n_sites
+                            needs_help(j + 1)
                             and nxt_rva + nxt_ins.len == decoded_sites[j + 1][0]
-                            and decoded_sites[j + 1][1].len < 5
-                            and decoded_sites[j + 1][0] not in inplace_ready
                             and decoded_sites[j + 1][0] not in self.targets
                         )
                         if not after_needs_help:
@@ -457,28 +578,22 @@ class Builder:
 
             total_cluster_len = sum(x[1].len for x in cluster)
 
-            # Case 1: Multi-instruction cluster (total_cluster_len >= 5 guaranteed since each VEX ins is >= 4B)
+            # Case 1: Multi-instruction cluster -> one call into one fused stub
             if len(cluster) > 1 and total_cluster_len >= 5:
-                ins_list = [x[1] for x in cluster]
-                last_ins = cluster[-1][1]
                 try:
-                    stub = self.make_stub(ins_list, last_ins.next_ip)
+                    stub = self.make_stub([('lower', x[1]) for x in cluster], cluster[-1][1].next_ip)
                 except Exception:
                     stub = None
                 if stub is not None:
                     first_rva = cluster[0][0]
-                    patch = b'\xe9' + struct.pack('<i', stub - first_rva - 5) + b'\x90' * (total_cluster_len - 5)
+                    patch = self.call_patch(first_rva, stub, total_cluster_len)
                     self.store(first_rva, patch)
+                    high_water = max(high_water, first_rva + total_cluster_len)
                     for idx_c, (c_rva, c_ins, c_orig) in enumerate(cluster):
                         consumed_rvas.add(c_rva)
                         rel_off = c_rva - first_rva
-                        c_patch = patch[rel_off : rel_off + c_ins.len]
-                        self.records.append({
-                            'rva': hex(c_rva), 'asm': self.fmt.format(c_ins),
-                            'original': c_orig.hex(), 'patch': c_patch.hex(),
-                            'stub_rva': hex(stub), 'cave_rva': None,
-                            'method': 'fused_block_jump' if idx_c == 0 else 'fused_block_member'
-                        })
+                        self._record(c_rva, c_ins, c_orig, patch[rel_off: rel_off + c_ins.len], stub, None,
+                                     'fused_block_call' if idx_c == 0 else 'fused_block_member')
                     i += len(cluster)
                     continue
 
@@ -495,20 +610,17 @@ class Builder:
                 continue
 
             if len(body) <= ins.len and self.stack_neutral(body, ins.ip):
-                patch = body + b'\x90' * (ins.len - len(body))
+                patch = body + self.nop_fill(ins.len - len(body))
                 self.store(rva, patch)
                 consumed_rvas.add(rva)
-                self.records.append({
-                    'rva': hex(rva), 'asm': self.fmt.format(ins),
-                    'original': orig_bytes.hex(), 'patch': patch.hex(),
-                    'stub_rva': None, 'cave_rva': None, 'method': 'in_place'
-                })
+                high_water = max(high_water, rva + ins.len)
+                self._record(rva, ins, orig_bytes, patch, None, None, 'in_place')
                 i += 1
                 continue
 
             if ins.len >= 5:
                 try:
-                    stub = self.make_stub([ins], ins.next_ip)
+                    stub = self.make_stub([('lower', ins)], ins.next_ip)
                 except Exception as err:
                     self.skipped.append({'rva': hex(rva), 'asm': str(ins), 'error': str(err)})
                     i += 1
@@ -516,76 +628,54 @@ class Builder:
                 if stub is None:
                     i += 1
                     continue
-                patch = b'\xe9' + struct.pack('<i', stub - rva - 5) + b'\x90' * (ins.len - 5)
+                patch = self.call_patch(rva, stub, ins.len)
                 self.store(rva, patch)
                 consumed_rvas.add(rva)
-                self.records.append({
-                    'rva': hex(rva), 'asm': self.fmt.format(ins),
-                    'original': orig_bytes.hex(), 'patch': patch.hex(),
-                    'stub_rva': hex(stub), 'cave_rva': None, 'method': 'native_jump'
-                })
+                high_water = max(high_water, rva + ins.len)
+                self._record(rva, ins, orig_bytes, patch, stub, None, 'native_call')
                 i += 1
                 continue
 
-            # Instruction is < 5 bytes (4-byte VEX instruction)
+            # Instruction is < 5 bytes (4-byte VEX instruction).
+            # 1) Forward neighbor stealing: move the next ordinary instruction into the stub.
+            if self.enable_neighbor_steal and self._steal(rva, ins, orig_bytes, site_rvas, overlaps_patch,
+                                                          targets_in, forward=True, high_water=high_water):
+                consumed_rvas.add(rva)
+                high_water = max(high_water, int(self.records[-1]['_end'], 16))
+                del self.records[-1]['_end']
+                i += 1
+                continue
+            # 2) Backward neighbor stealing: move the previous ordinary instruction into the stub.
+            if self.enable_neighbor_steal and self._steal(rva, ins, orig_bytes, site_rvas, overlaps_patch,
+                                                          targets_in, forward=False, high_water=high_water):
+                consumed_rvas.add(rva)
+                high_water = max(high_water, int(self.records[-1]['_end'], 16))
+                del self.records[-1]['_end']
+                i += 1
+                continue
+
+            # 3) Padding cave: short jump to a 5-byte jump in nearby inter-function padding.
             cave = self.cave(rva)
             if cave is not None:
                 try:
-                    stub = self.make_stub([ins], ins.next_ip)
+                    stub = self.make_stub([('lower', ins)], ins.next_ip, linkage='pushret')
                 except Exception as err:
                     self.skipped.append({'rva': hex(rva), 'asm': str(ins), 'error': str(err)})
                     i += 1
                     continue
                 if stub is not None:
                     self.store(cave, b'\xe9' + struct.pack('<i', stub - cave - 5))
-                    patch = b'\xeb' + struct.pack('<b', cave - rva - 2) + b'\x90' * (ins.len - 2)
+                    patch = b'\xeb' + struct.pack('<b', cave - rva - 2) + self.nop_fill(ins.len - 2)
                     self.store(rva, patch)
                     consumed_rvas.add(rva)
-                    self.records.append({
-                        'rva': hex(rva), 'asm': self.fmt.format(ins),
-                        'original': orig_bytes.hex(), 'patch': patch.hex(),
-                        'stub_rva': hex(stub), 'cave_rva': hex(cave), 'method': 'padding_jump'
-                    })
+                    high_water = max(high_water, rva + ins.len)
+                    self._record(rva, ins, orig_bytes, patch, stub, cave, 'padding_jump')
                     i += 1
                     continue
 
-            # ULTRA 4-BYTE NEIGHBOR STEALING:
-            # If the 4-byte instruction is inside a known .pdata function and has no nearby padding cave,
-            # check if the immediately following instruction at (rva + ins.len) can be safely fused into the stub!
-            if self.enable_neighbor_steal:
-                nxt_rva = rva + ins.len
-                if (nxt_rva not in site_rvas
-                        and not any(nxt_rva + k in self.targets for k in range(8))
-                        and self._in_same_pdata_function(rva, nxt_rva + 15)):
-                    nxt_raw = self.pe.get_data(nxt_rva, 15)
-                    nxt_ins = ix.Decoder(64, nxt_raw, ip=self.base + nxt_rva).decode()
-                    if (self._is_safe_neighbor(nxt_ins)
-                            and self._in_same_pdata_function(rva, nxt_rva + nxt_ins.len)
-                            and not overlaps_patch(rva, nxt_rva + nxt_ins.len)
-                            and not any(nxt_rva + k in self.targets for k in range(nxt_ins.len))):
-                        try:
-                            stub = self.make_neighbor_stub(
-                                ins, nxt_raw[:nxt_ins.len], prepend_neighbor=False, next_ip=nxt_ins.next_ip
-                            )
-                        except Exception:
-                            stub = None
-                        if stub is not None:
-                            comb_len = ins.len + nxt_ins.len
-                            patch = b'\xe9' + struct.pack('<i', stub - rva - 5) + b'\x90' * (comb_len - 5)
-                            self.store(rva, patch)
-                            consumed_rvas.add(rva)
-                            self.records.append({
-                                'rva': hex(rva), 'asm': self.fmt.format(ins),
-                                'original': orig_bytes.hex(), 'patch': patch[:ins.len].hex(),
-                                'stub_rva': hex(stub), 'cave_rva': None,
-                                'method': 'neighbor_steal_jump'
-                            })
-                            i += 1
-                            continue
-
-            # Fallback: Vectored Exception Handler redirect via fxcompat.dll
+            # 4) Fallback: Vectored Exception Handler redirect via fxcompat.dll
             try:
-                stub = self.make_stub([ins], ins.next_ip)
+                stub = self.make_stub([('lower', ins)], ins.next_ip, linkage='pushret')
             except Exception as err:
                 self.skipped.append({'rva': hex(rva), 'asm': str(ins), 'error': str(err)})
                 i += 1
@@ -597,18 +687,53 @@ class Builder:
             self.redirects.append((rva, stub))
             self.store(rva, patch)
             consumed_rvas.add(rva)
-            self.records.append({
-                'rva': hex(rva), 'asm': self.fmt.format(ins),
-                'original': orig_bytes.hex(), 'patch': patch.hex(),
-                'stub_rva': hex(stub), 'cave_rva': None,
-                'method': 'native_exception_redirect'
-            })
+            self._record(rva, ins, orig_bytes, patch, stub, None, 'native_exception_redirect')
             i += 1
 
         print(
             'Translated', len(self.records), 'skipped', len(self.skipped),
             dict(collections.Counter(r['method'] for r in self.records)), flush=True
         )
+
+    def _steal(self, rva, ins, orig_bytes, site_rvas, overlaps_patch, targets_in, forward, high_water) -> bool:
+        if forward:
+            nb_rva = rva + ins.len
+            if nb_rva in site_rvas:
+                return False
+            nb = ix.Decoder(64, self.pe.get_data(nb_rva, 15), ip=self.base + nb_rva).decode()
+            first, end = rva, nb_rva + nb.len
+            # the site's own bytes stay addressable only at rva; nothing may jump into the rest
+            blocked = targets_in(rva + 1, end)
+            items = [('lower', ins), ('reloc', nb)]
+        else:
+            nb = self._previous_instruction(rva)
+            if nb is None:
+                return False
+            nb_rva = nb.ip - self.base
+            if nb_rva in site_rvas or nb_rva < high_water:
+                return False
+            first, end = nb_rva, ins.next_ip - self.base
+            blocked = targets_in(nb_rva + 1, end)
+            items = [('reloc', nb), ('lower', ins)]
+        if blocked or not self._is_safe_neighbor(nb):
+            return False
+        if not self._in_same_pdata_function(first, end) or overlaps_patch(first, end):
+            return False
+        if end - first < 5:
+            return False
+        try:
+            stub = self.make_stub(items, self.base + end)
+        except Exception:
+            stub = None
+        if stub is None:
+            return False
+        patch = self.call_patch(first, stub, end - first)
+        self.store(first, patch)
+        self._record(rva, ins, orig_bytes, patch[rva - first: rva - first + ins.len], stub, None,
+                     'neighbor_steal_call' if forward else 'neighbor_steal_back_call')
+        self.records[-1]['neighbor'] = {'rva': hex(nb_rva), 'asm': self.fmt.format(nb)}
+        self.records[-1]['_end'] = hex(end)
+        return True
 
     def aux_entry(self, iat: int):
         old = self.pe.OPTIONAL_HEADER.AddressOfEntryPoint
@@ -711,15 +836,21 @@ class Builder:
             'unwind_intervals': len(self.unwind_entries),
             'patches': [{**q, 'rva': hex(q['rva'])} for q in self.patches],
             'unwind_refusals': self.unwind_refusals,
+            'engine': 'FX Reborn Toolkit Ultra 3.0',
             'optimizations': {
+                'call_ret_stub_linkage': True,
                 'basic_block_fusion': self.enable_fusion,
-                'neighbor_stealing_4b': self.enable_neighbor_steal,
-                'fma_zero_scratch': True,
-                'f16c_simd_vectorized': True,
+                'neighbor_stealing_forward': self.enable_neighbor_steal,
+                'neighbor_stealing_backward': self.enable_neighbor_steal,
+                'constant_pool': True,
+                'fma_exact_zero_scratch': True,
+                'lane_split_dst_scratch': avx2_lower.LANES_USE_DST,
+                'f16c_simd_pooled': True,
                 'andn_in_place': True,
             },
             'limitations': [
-                'Synthetic return PUSH prefix lacks original-function unwind mapping',
+                'FMA3 is emulated as a rounded multiply followed by a rounded add/sub (two roundings)',
+                'VEH and padding-cave stubs use a synthetic PUSH return address (call-linked stubs unwind through the original function)',
                 'Fault-address translation and partial-instruction fault recovery are not implemented',
                 'Further runtime coverage and gameplay testing required'
             ]

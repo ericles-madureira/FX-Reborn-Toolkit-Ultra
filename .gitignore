@@ -11,3 +11,8 @@ __pycache__/
 !python/python.exe
 *.zip
 !python/python313.zip
+
+# Gerados pelo motor / testes
+engine/staging/
+engine/code_cache/
+tests/selftest/bin/

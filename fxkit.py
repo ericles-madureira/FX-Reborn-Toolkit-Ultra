@@ -2,10 +2,12 @@
 
 Rewrites AVX2, BMI2, FMA3, BMI1, F16C, LZCNT, MOVBE (and optional POPCNT) instructions in a game's
 exe or DLL into ultra-optimized AVX1/SSE4.2/x86-64 code with:
-- Multi-Instruction Basic-Block Fusion (single trampoline jump per contiguous sequence)
-- 4-Byte Neighbor Stealing (eliminating slow Vectored Exception Handler traps)
-- Zero-Scratch FMA3 & In-Place ANDN / VPBROADCASTD / VPCMPEQ All-Ones Lowering
-- Vectorized SIMD F16C (VCVTPH2PS) Lowering
+- CALL/RET stub linkage (every stub exit is predicted by the return-stack buffer)
+- Multi-Instruction Basic-Block Fusion (one call per contiguous sequence)
+- Forward AND backward neighbor stealing (keeps short sites off the slow VEH path)
+- Exact FMA3 lowering with a sign-constant pool (zero scratch / small stack slot)
+- In-Place ANDN / VPBROADCASTD / VPCMPEQ All-Ones, destination-as-scratch lane splits
+- Pooled-constant SIMD F16C (VCVTPH2PS) lowering
 
 Commands:
   gui                                   Opens the graphical user interface (Native Dark Mode Dashboard).
@@ -29,7 +31,7 @@ ROOT = Path(__file__).resolve().parent
 ENGINE = ROOT / "engine"
 sys.path[:0] = [str(ENGINE / "pylibs"), str(ENGINE)]
 
-VERSION = "2.0.0-Ultra"
+VERSION = "3.0.0-Ultra"
 BASELINE = {"X64", "SSE", "SSE2", "CMOV", "CX8", "FPU", "MMX", "FXSR", "INTEL8086", "INTEL186",
             "INTEL286", "INTEL386", "INTEL486", "INTEL8086_ONLY", "CPUID", "SYSCALL", "TSC",
             "MULTIBYTENOP", "PAUSE", "CLFSH", "MSR", "RDTSCP", "XSAVE", "OSXSAVE", "SSE3",

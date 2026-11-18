@@ -216,7 +216,7 @@ HTML_UI = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FX Reborn Toolkit Ultra v2.0 — Emulador Estático & Otimizador AVX2 / FMA / F16C / BMI</title>
+<title>FX Reborn Toolkit Ultra v3.0 — Emulador Estático & Otimizador AVX2 / FMA / F16C / BMI</title>
 <style>
   :root {
     --bg-main: #0b0f19;
@@ -507,7 +507,7 @@ HTML_UI = r"""<!DOCTYPE html>
   <div class="brand">
     <h1>
       FX Reborn Toolkit
-      <span class="badge-ultra">v2.0 ULTRA</span>
+      <span class="badge-ultra">v3.0 ULTRA</span>
     </h1>
     <p>Reescritor Estático & Emulador AOT de Instruções AVX2, FMA3, F16C, BMI1/2, LZCNT, MOVBE e POPCNT</p>
   </div>
@@ -626,14 +626,14 @@ HTML_UI = r"""<!DOCTYPE html>
           <input type="checkbox" id="optFusion" checked>
           <div>
             <div class="feat-title">Fusão de Básico-Blocos (Cluster Fusion)</div>
-            <div class="feat-desc">Agrupa instruções consecutivas em um único salto nativo, eliminando milhares de desvios e exceções VEH.</div>
+            <div class="feat-desc">Agrupa instruções consecutivas em uma única chamada CALL/RET (prevista pelo processador), eliminando milhares de desvios e exceções VEH.</div>
           </div>
         </label>
         <label class="feat-box">
           <input type="checkbox" id="optSteal" checked>
           <div>
             <div class="feat-title">Roubo Seguro de Vizinho 4-Bytes (Zero-VEH)</div>
-            <div class="feat-desc">Incorpora a instrução vizinha em sites AVX2 de 4 bytes isolados para usar JMP nativo em vez de exceção VEH.</div>
+            <div class="feat-desc">Incorpora a instrução vizinha (seguinte ou anterior) em sites AVX2 de 4 bytes isolados para usar CALL nativo em vez de exceção VEH.</div>
           </div>
         </label>
       </div>
@@ -657,7 +657,7 @@ HTML_UI = r"""<!DOCTYPE html>
         </div>
         <span id="taskBadge" style="font-family: var(--mono); font-size: 11px; color: var(--text-muted);">IDLE</span>
       </div>
-      <div id="logConsole" class="terminal">Bem-vindo ao FX Reborn Toolkit Ultra v2.0!
+      <div id="logConsole" class="terminal">Bem-vindo ao FX Reborn Toolkit Ultra v3.0!
 Selecione um executável (.exe ou .dll) à esquerda para escanear todas as instruções (AVX2, FMA3, F16C, BMI1/2, LZCNT, MOVBE, POPCNT) ou gerar diretamente o novo executável otimizado.</div>
     </div>
 
@@ -813,7 +813,7 @@ function renderTables(state) {
     const b = state.last_build;
     const m = b.methods || {};
     const inplace = (m.in_place || 0) + (m.fused_block_member || 0);
-    const jumps = (m.native_jump || 0) + (m.fused_block_jump || 0) + (m.padding_jump || 0) + (m.neighbor_steal_jump || 0);
+    const jumps = (m.native_call || 0) + (m.fused_block_call || 0) + (m.padding_jump || 0) + (m.neighbor_steal_call || 0) + (m.neighbor_steal_back_call || 0);
     const veh = m.native_exception_redirect || 0;
     document.getElementById('kpiTotal').textContent = (b.translated || 0).toLocaleString();
     document.getElementById('kpiInPlace').textContent = inplace.toLocaleString();
@@ -1122,7 +1122,7 @@ def launch(port: int = 0) -> int:
     srv.listen(16)
     url = f"http://127.0.0.1:{actual_port}/"
     print(f"============================================================")
-    print(f"  FX Reborn Toolkit Ultra v2.0 - Interface Gráfica Ativa")
+    print(f"  FX Reborn Toolkit Ultra v3.0 - Interface Gráfica Ativa")
     print(f"  Acesse: {url}")
     print(f"  (Mantenha esta janela aberta enquanto utiliza o programa)")
     print(f"============================================================", flush=True)

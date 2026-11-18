@@ -14,6 +14,8 @@ Ultra Optimizations:
 5. VPBROADCASTW -> VPSHUFLW + VPSHUFD (+ VINSERTF128) with zero scratch registers and zero stack usage!
 6. VPBROADCASTB (when dst != src) -> VPXOR + VPSHUFB (+ VINSERTF128) with zero scratch registers and zero stack usage!
 7. VPERMQ (when high/low lane selectors match) -> VPERM2F128 + VSHUFPD with zero scratch registers and zero stack usage!
+8. Ultra 3.0: lane-split integer ops use the destination as the first upper-half
+   scratch when the instruction does not read it (one YMM save/restore less).
 """
 from pathlib import Path
 import sys
@@ -130,6 +132,12 @@ def _lower_all_ones(ins):
         return [I.create_reg_reg_reg_i32(C.VEX_VCMPPS_YMM_YMM_YMMM256_IMM8, dst, dst, dst, 0x0F)]
     return None
 
+# Ultra 3.0: when the destination is not read by the instruction, it doubles as
+# the first upper-half scratch, so one fewer YMM is saved/restored (32B store +
+# 32B load less per execution) without lengthening the dependency chain.
+LANES_USE_DST = True
+
+
 def _lower_lanes(ins):
     if MNEMONIC_NAMES.get(ins.mnemonic) not in LANE_MNEMONICS or not R.YMM0 <= ins.op0_register <= R.YMM15:
         return None
@@ -142,6 +150,11 @@ def _lower_lanes(ins):
     for n in range(1,ins.op_count):
         if ins.op_kind(n)==O.REGISTER and R.YMM0<=ins.op_register(n)<=R.YMM15 and ins.op_register(n) not in unique:
             unique.append(ins.op_register(n))
+    dst_x=xmm(ins.op0_register)
+    sources={xmm(ins.op_register(n)) for n in range(1,ins.op_count)
+        if ins.op_kind(n)==O.REGISTER and R.XMM0<=ins.op_register(n)<=R.YMM15}
+    if LANES_USE_DST and dst_x not in sources:
+        return _lower_lanes_dst(ins,code,unique,dst_x)
     regs,size,before,after=_scratch_frame(ins,max(1,len(unique)))
     upper=ins.copy();upper.code=code;upper.op0_register=regs[0]
     for src,scratch in zip(unique,regs):
@@ -157,6 +170,31 @@ def _lower_lanes(ins):
             low.set_op_register(n,xmm(ins.op_register(n)))
     low=_adjust_memory(low,0,size)
     join=I.create_reg_reg_reg_i32(C.VEX_VINSERTF128_YMM_YMM_XMMM128_IMM8,ins.op0_register,ins.op0_register,regs[0],1)
+    return before+[upper,low,join]+after
+
+def _lower_lanes_dst(ins, code, unique, dst_x):
+    """Lane split using the (unread) destination for the first upper half.
+
+    upper: op dst.x, hi(u0)=dst.x, hi(u1)=S0 ... | low: op S0, lo(u0), lo(u1)
+    join:  vinsertf128 dst, S0(lo), dst.x(hi), 1"""
+    k=len(unique)
+    regs,size,before,after=_scratch_frame(ins,max(1,k-1))
+    hi=[dst_x]+regs[:k-1]
+    for src,holder in zip(unique,hi):
+        before.append(I.create_reg_reg_i32(C.VEX_VEXTRACTF128_XMMM128_YMM_IMM8,holder,src,1))
+    upper=ins.copy();upper.code=code;upper.op0_register=dst_x
+    for n in range(1,ins.op_count):
+        if ins.op_kind(n)==O.REGISTER and ins.op_register(n) in unique:
+            upper.set_op_register(n,hi[unique.index(ins.op_register(n))])
+    memory_width=ix.MemorySizeExt.info(ins.memory_size).size
+    upper=_adjust_memory(upper,16 if memory_width==32 else 0,size)
+    lo_reg=regs[0]
+    low=ins.copy();low.code=code;low.op0_register=lo_reg
+    for n in range(1,ins.op_count):
+        if ins.op_kind(n)==O.REGISTER and R.YMM0<=ins.op_register(n)<=R.YMM15:
+            low.set_op_register(n,xmm(ins.op_register(n)))
+    low=_adjust_memory(low,0,size)
+    join=I.create_reg_reg_reg_i32(C.VEX_VINSERTF128_YMM_YMM_XMMM128_IMM8,ins.op0_register,ymm(lo_reg),dst_x,1)
     return before+[upper,low,join]+after
 
 def _lower_permq(ins):

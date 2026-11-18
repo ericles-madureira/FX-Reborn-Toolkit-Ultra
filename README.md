@@ -20,10 +20,40 @@ Nothing here is game-specific except the `game.json` you write.
   - The test program is compiled with AVX2, and its reference answers come from plain C compiled without AVX2.
   - On an FX-8350, which cannot run the original at all, every converted operation matches the reference over 3,000 random and edge-case inputs each.
   - This passed both as an **exe** and as a **DLL** loaded by an unmodified exe.
+- **FMA3 / BMI1 / LZCNT / MOVBE** (`tests/selftest/fma_*.cpp`, Ultra 3.0): 20 kernels, including accumulate (231) and Horner (213) loops, checked against a plain-AVX reference over 4,000 inputs each, with exact cancellations and zero signs.
+- **Native lowering tests** (`tests/native`, Ultra 3.0): every generated sequence is executed on the test machine (AVX1 is enough) from random register, flag, stack and memory states and compared bit for bit with a Python model of the original instruction: 11,005 cases, ~164,000 runs, plus an exhaustive 38,400-case FMA register-aliasing sweep. The rare site strategies (backward neighbor steal, padding cave, VEH) are also forced and run.
 - **FINAL FANTASY VII REBIRTH** (`examples/ff7rebirth`): 23,171 sites.
-  - Through the generic toolkit, the result is byte-identical to the play-tested FX Reborn v6 file. That holds both from the saved site list and from a fresh scan.
+  - The original FX Reborn v6 output was play-tested. **Ultra 3.0 output is no longer byte-identical to it** (CALL/RET stub linkage, rewritten FMA and F16C lowerings, more neighbor stealing) and has not been play-tested in the game yet.
 
 Only one real game has been play-tested. Treat every new game as experimental.
+
+## Ultra 3.0
+
+Measured on an i7-2600 (Sandy Bridge, AVX only), same exe converted by Ultra 2.0 and 3.0 (`tests/selftest/bench.cpp`):
+
+| Hot loop | 2.0 | 3.0 |
+|---|---|---|
+| FMA accumulate, 4x ymm (231/213) | 9.3 ns/iter | 3.1 ns/iter |
+| FMA scalar ss (231) | 9.7 ns/iter | 2.3 ns/iter |
+| AVX2 integer (vpmulld/vpaddd/vpslld) | 12.6 ns/iter | 5.8 ns/iter |
+| same loop, site forced through the VEH handler | | 1,753 ns/iter |
+
+- **CALL/RET stub linkage.** Sites call their stub and the stub returns normally, so every exit is predicted by the return-stack buffer. 2.x jumped in and left through `push [lit]; ret`, which mispredicts on every execution.
+- **Constant pool** at the start of `.fxcpt` (sign masks, F16C constants), read RIP-relative.
+- **FMA3**: exact operand semantics for every 132/213/231 form; zero scratch when the destination is a multiplicand, a 4-32 byte stack slot (not a whole YMM) when it is the addend.
+- **Lane splits** use the destination as the first scratch when the instruction does not read it.
+- **VCVTPH2PS** with pooled constants: 25 instructions (xmm) / 46 (ymm) instead of 55 / 97.
+- **Neighbor stealing** forward and backward, relocating RIP-relative and `[rsp+x]` neighbors, so fewer 4-byte sites fall back to the VEH handler.
+- **Fixed 2.x bugs:** packed 231 FMA computed `2*a*b` (FMADD) and `0` (FMSUB); scalar 213 FNMADD with memory corrupted upper lanes; FNMSUB/FMSUBADD zero signs; every negative half in VCVTPH2PS; VCVTPH2PS RIP-relative and all VCVTPS2PH sites failed to lower (left as illegal instructions); 16-bit MOVBE changed CF/OF; POPCNT left PF set.
+
+Run the checks:
+
+```bat
+:: lowering tests (any AVX CPU), about 10 minutes
+python\python.exe tests\native\test_lowering.py
+:: end-to-end self-tests with MinGW-w64 GCC (or build.cmd with MSVC)
+tests\selftest\build_gcc.cmd
+```
 
 ## Requirements
 
@@ -113,10 +143,11 @@ Players unzip the package and run `Install or Update.cmd`, which:
    - Walks the program's control flow from its entry point, exports and exception-table functions.
    - Code reached only through pointers is accepted after an automatic review: the reference must really point there, the code must decode cleanly, and the spot must not look like a jump table.
    - Bytes found only by a linear sweep are never patched, because they may be data.
-2. **Lower** (`engine/avx2_lower.py`, `engine/bmi2_lower.py`, `engine/bmi2_extra.py`): each instruction becomes an AVX/SSE/x86-64 sequence that preserves every other register and the flags.
+2. **Lower** (`engine/avx2_lower.py`, `engine/bmi2_lower.py`, `engine/bmi2_extra.py`, `engine/sandy_lower.py`): each instruction becomes an AVX/SSE/x86-64 sequence that preserves every other register and the flags.
 3. **Patch** (`engine/build_static_mod.py`):
-   - Sites of 5 bytes or more jump to their replacement code in a new `.fxcpt` section.
+   - Sites of 5 bytes or more `call` their replacement code in a new `.fxcpt` section, which returns with `ret`.
    - Shorter ones are rewritten in place when the replacement fits.
+   - Otherwise they are fused with an adjacent site, or the next or previous ordinary instruction is moved into the stub so a `call` fits.
    - Otherwise they jump through nearby padding.
    - Otherwise they're left in place, and `fxcompat.dll`'s exception handler redirects them.
    - Unwind data is generated for the new code.
