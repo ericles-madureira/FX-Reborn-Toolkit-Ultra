@@ -1,124 +1,129 @@
-# FX Reborn Toolkit Ultra 3.0 — AVX2 / FMA3 / F16C / BMI emulation fix for old CPUs
+# FX Reborn Toolkit Ultra 3.0
 
-[🇺🇸 English](#fx-reborn-toolkit) · [🇧🇷 Português](#português) · [Guia completo em português](LEIA_ME_COMO_USAR.md)
+**Static binary translator for AVX2, FMA3, F16C, BMI1/2, LZCNT & MOVBE on legacy AVX CPUs**
 
-> **Game won't start or crashes with "illegal instruction" on an AMD FX or Intel 2nd/3rd gen (i7-2600, i5-2500K, i7-3770)?** This toolkit rewrites the game `.exe`/`.dll` so AVX2, FMA3, F16C, BMI1/BMI2, LZCNT and MOVBE instructions run on CPUs that only have AVX. Author's result on **Final Fantasy VII Rebirth** (i7-2600, 16 GB DDR3: ~30 FPS average, 75–85 FPS in calmer areas, with an RTX 2060 Super).
+[🇺🇸 English](#english) · [🇧🇷 Português](#português) · [📖 Guia completo em português](LEIA_ME_COMO_USAR.md)
+
+> **Game won't start or crashes with *"illegal instruction"* (`0xC000001D`) on an AMD FX or Intel 2nd/3rd Gen CPU (`i5-2500K`, `i7-2600`, `i7-3770`)?**  
+> This toolkit statically rewrites game `.exe` and `.dll` binaries so instructions from newer extensions (**AVX2, FMA3, F16C, BMI1/BMI2, LZCNT, MOVBE**) run natively on CPUs that only support **AVX**. Tested in **Final Fantasy VII Rebirth** on an i7-2600 (16 GB DDR3, RTX 2060 Super), achieving **~30 FPS average and 75–85 FPS in calmer areas**.
 >
-> **O jogo não abre ou fecha com "instrução ilegal" num AMD FX ou Intel de 2ª/3ª geração (i7-2600, i5-2500K, i7-3770)?** Este kit reescreve o `.exe`/`.dll` do jogo para que instruções AVX2, FMA3, F16C, BMI1/BMI2, LZCNT e MOVBE rodem em processadores que só têm AVX. Resultado do autor no **Final Fantasy VII Rebirth** (i7-2600, 16 GB DDR3: média de 30 FPS, 75–85 FPS em partes mais tranquilas, com RTX 2060 Super).
+> **O jogo não abre ou fecha com *"instrução ilegal"* (`0xC000001D`) em um AMD FX ou Intel de 2ª/3ª geração (`i5-2500K`, `i7-2600`, `i7-3770`)?**  
+> Este kit reescreve o `.exe`/`.dll` do jogo para que instruções **AVX2, FMA3, F16C, BMI1/BMI2, LZCNT e MOVBE** rodem em processadores que possuem apenas **AVX**. Resultado medido em **Final Fantasy VII Rebirth** (i7-2600, 16 GB DDR3, RTX 2060 Super): **média de ~30 FPS e 75–85 FPS em áreas mais leves**.
 
-The graphical interface is available in **English and Portuguese** (PT-BR / EN buttons at the top; it opens in your browser's language). / A interface gráfica está em **inglês e português** (botões PT-BR / EN no topo).
-
-## Português
-
-**Como usar (interface gráfica):**
-
-1. Dê dois cliques em **`Open- Iniciar_Interface_GUI.cmd`** (não precisa instalar nada: o Python já vem junto).
-2. Em **1**, escolha o `.exe` (ou `.dll`) do jogo e uma **pasta de saída diferente** da pasta do jogo.
-3. Em **2**, escolha o preset do seu processador (Intel 2ª geração, Intel 3ª geração ou AMD FX).
-4. Clique em **1. Analisar** para ver quantas instruções o jogo usa, e em **2. Detectar Trava de CPU** se o jogo recusa abrir com uma mensagem sobre AVX2.
-5. Clique em **⚡ 3. Gerar Executável** e copie o executável gerado **e** o `fxcompat.dll` para a pasta do jogo (faça backup do original antes).
-
-Se o jogo só exige **F16C** (por exemplo Ghost of Tsushima num i7-2600), use o projeto **FX-Reborn-F16C-Ultra**, que é mais simples. O guia completo, com todas as otimizações e correções da 3.0, está em [LEIA_ME_COMO_USAR.md](LEIA_ME_COMO_USAR.md).
-
-**Avisos:** não use em jogos online com anti-cheat (risco de banimento). Distribua só a ferramenta e as configurações, **nunca os executáveis do jogo**.
+*The graphical interface is available in **English and Portuguese** (auto-detects your browser language or switch via the top **PT-BR / EN** buttons).*
 
 ---
 
-# FX Reborn Toolkit
+## Português
 
-**Make AVX2-only PC games run on CPUs that only have AVX** (AMD FX, Piledriver-era APUs and similar). It's the engine behind [FX Reborn](https://www.nexusmods.com/finalfantasy7rebirth/mods/2477), the FINAL FANTASY VII REBIRTH mod that took an AMD FX-8350 from about **1 FPS under Intel SDE emulation to 30–85 FPS**, packaged so other modders can do the same for other games.
+### Como usar (Interface Gráfica)
 
-The toolkit rewrites a game's AVX2 and BMI2 instructions into equivalent AVX/SSE code, ahead of time, inside the exe or DLL. There's no emulator and no per-instruction exception at run time. It also gives you:
+1. Execute **`Open- Iniciar_Interface_GUI.cmd`** (não requer instalação — o Python 3.13 já vem incluído).
+2. Na etapa **1**, selecione o `.exe` (ou `.dll`) do jogo e defina uma **pasta de saída diferente** da pasta original do jogo.
+3. Na etapa **2**, escolha o *preset* do seu processador (**Intel 2ª geração**, **Intel 3ª geração** ou **AMD FX**).
+4. Clique em **1. Analisar** para verificar quais instruções o jogo utiliza e, caso o jogo exiba um aviso bloqueando CPUs sem AVX2, clique em **2. Detectar Trava de CPU**.
+5. Clique em **⚡ 3. Gerar Executável**, faça backup dos originais e copie o executável modificado **junto com o `fxcompat.dll`** para a pasta do jogo.
 
-- **A feasibility scan:** how many AVX2/BMI2 instructions the game has, which ones can be translated, and what other CPU features players will still need.
-- **CPU-check finder:** locates "This CPU does not support AVX2" checks and suggests a patch for them.
-- **Update-proof patches:** players' installers build the patch on their own PC for whatever game version they have. Byte patches are matched by pattern, not by address.
-- **A safety net:** instructions the scan missed are logged with their module and address when the game hits them, and added on the next install.
-- **One-command player packages:** launchers, your config and a private Python, so players install nothing.
+> [!TIP]
+> **Seu jogo exige apenas F16C** (como *Ghost of Tsushima* em um i7-2600)? Utilize o **[FX-Reborn-F16C-Ultra](https://github.com/mcirish3/FX-Reborn-F16C-Ultra)**, que é mais simples e não precisa de DLL auxiliar.
 
-Nothing here is game-specific except the `game.json` you write.
+Para instruções detalhadas, configurações avançadas e todas as otimizações da versão 3.0, consulte o **[Guia Completo em Português (`LEIA_ME_COMO_USAR.md`)](LEIA_ME_COMO_USAR.md)**.
 
-**Download:** [GitHub Releases](https://github.com/mcirish3/FX-Reborn-Toolkit/releases) or [Nexus Mods](https://www.nexusmods.com/finalfantasy7rebirth/mods/2499). The download includes Python 3.13, so there's nothing to install.
+> [!WARNING]
+> **Não utilize em jogos online com anti-cheat** (risco de banimento). Compartilhe apenas esta ferramenta e seus arquivos de configuração — **nunca distribua executáveis ou DLLs de jogos**.
 
-## Tested
+---
 
-- **37 different AVX2/BMI2 operations** (`tests/selftest`): integer math, variable shifts, shuffles, permutes, gathers, pack/unpack, SAD, movemask, and SHLX/SHRX/SARX/RORX/BZHI/PDEP/PEXT/MULX.
-  - The test program is compiled with AVX2, and its reference answers come from plain C compiled without AVX2.
-  - On an FX-8350, which cannot run the original at all, every converted operation matches the reference over 3,000 random and edge-case inputs each.
-  - This passed both as an **exe** and as a **DLL** loaded by an unmodified exe.
-- **FMA3 / BMI1 / LZCNT / MOVBE** (`tests/selftest/fma_*.cpp`, Ultra 3.0): 20 kernels, including accumulate (231) and Horner (213) loops, checked against a plain-AVX reference over 4,000 inputs each, with exact cancellations and zero signs.
-- **Native lowering tests** (`tests/native`, Ultra 3.0): every generated sequence is executed on the test machine (AVX1 is enough) from random register, flag, stack and memory states and compared bit for bit with a Python model of the original instruction: 11,005 cases, ~164,000 runs, plus an exhaustive 38,400-case FMA register-aliasing sweep. The rare site strategies (backward neighbor steal, padding cave, VEH) are also forced and run.
-- **FINAL FANTASY VII REBIRTH** (`examples/ff7rebirth`): 23,171 sites.
-  - The original FX Reborn v6 output was play-tested. **Ultra 3.0 output is no longer byte-identical to it** (CALL/RET stub linkage, rewritten FMA and F16C lowerings, more neighbor stealing) and has not been play-tested in the game yet.
+## English
 
-Only one real game has been play-tested. Treat every new game as experimental.
+**FX Reborn Toolkit** makes modern AVX2-dependent PC games run on CPUs that only support **AVX** (Intel Sandy Bridge / Ivy Bridge and AMD Bulldozer / Piledriver). It is the engine behind [FX Reborn](https://www.nexusmods.com/finalfantasy7rebirth/mods/2477), the *FINAL FANTASY VII REBIRTH* mod that took an AMD FX-8350 from **~1 FPS under Intel SDE emulation to 30–85 FPS**, packaged so modders can bring the same capability to other games.
 
-## Ultra 3.0
+The toolkit translates **AVX2, FMA3, F16C, BMI1/BMI2, LZCNT, and MOVBE** instructions ahead of time into equivalent AVX/SSE/x86-64 code inside the binary—with no background emulator and no per-instruction exception overhead at runtime.
 
-Measured on an i7-2600 (Sandy Bridge, AVX only), same exe converted by Ultra 2.0 and 3.0 (`tests/selftest/bench.cpp`):
+### Key Features
 
-| Hot loop | 2.0 | 3.0 |
-|---|---|---|
-| FMA accumulate, 4x ymm (231/213) | 9.3 ns/iter | 3.1 ns/iter |
-| FMA scalar ss (231) | 9.7 ns/iter | 2.3 ns/iter |
-| AVX2 integer (vpmulld/vpaddd/vpslld) | 12.6 ns/iter | 5.8 ns/iter |
-| same loop, site forced through the VEH handler | | 1,753 ns/iter |
+- **Feasibility scan:** Counts unsupported instructions in an executable or DLL, flags untranslatable forms, and lists baseline CPU requirements.
+- **CPU-check finder:** Locates startup feature gates (e.g., *"This CPU does not support AVX2"*) and generates byte patches to bypass them.
+- **Update-proof mod packages:** End-user installers build the patched binary locally on their own machine using wildcard byte patterns rather than hardcoded addresses.
+- **Runtime safety net (`fxcompat.dll`):** Any instruction missed during static discovery is caught by a Vectored Exception Handler, logged with its module and offset to `fxreborn-missed.log`, and automatically included on the next build.
+- **Zero-install distribution:** Bundles a portable Python 3.13 runtime and launcher scripts so end users install nothing.
 
-- **CALL/RET stub linkage.** Sites call their stub and the stub returns normally, so every exit is predicted by the return-stack buffer. 2.x jumped in and left through `push [lit]; ret`, which mispredicts on every execution.
-- **Constant pool** at the start of `.fxcpt` (sign masks, F16C constants), read RIP-relative.
-- **FMA3**: exact operand semantics for every 132/213/231 form; zero scratch when the destination is a multiplicand, a 4-32 byte stack slot (not a whole YMM) when it is the addend.
-- **Lane splits** use the destination as the first scratch when the instruction does not read it.
-- **VCVTPH2PS** with pooled constants: 25 instructions (xmm) / 46 (ymm) instead of 55 / 97.
-- **Neighbor stealing** forward and backward, relocating RIP-relative and `[rsp+x]` neighbors, so fewer 4-byte sites fall back to the VEH handler.
-- **Fixed 2.x bugs:** packed 231 FMA computed `2*a*b` (FMADD) and `0` (FMSUB); scalar 213 FNMADD with memory corrupted upper lanes; FNMSUB/FMSUBADD zero signs; every negative half in VCVTPH2PS; VCVTPH2PS RIP-relative and all VCVTPS2PH sites failed to lower (left as illegal instructions); 16-bit MOVBE changed CF/OF; POPCNT left PF set.
+**Download:** [GitHub Releases](https://github.com/mcirish3/FX-Reborn-Toolkit/releases) or [Nexus Mods](https://www.nexusmods.com/finalfantasy7rebirth/mods/2499) *(includes portable Python 3.13)*.
 
-Run the checks:
+### What's New in Ultra 3.0
+
+Benchmarked on an Intel Core i7-2600 (Sandy Bridge, AVX-only) running the exact same test binary (`tests/selftest/bench.cpp`):
+
+| Benchmark Workload | Ultra 2.0 | Ultra 3.0 |
+| :--- | :---: | :---: |
+| FMA accumulate, 4× `ymm` (`231`/`213`) | 9.3 ns/iter | **3.1 ns/iter** |
+| FMA scalar `ss` (`231`) | 9.7 ns/iter | **2.3 ns/iter** |
+| AVX2 integer (`vpmulld` / `vpaddd` / `vpslld`) | 12.6 ns/iter | **5.8 ns/iter** |
+| Same AVX2 integer loop via VEH fallback | — | 1,753 ns/iter |
+
+- **`CALL`/`RET` stub linkage:** Call sites invoke stubs via `CALL` and return via `RET`, allowing the CPU's Return Stack Buffer (RSB) to predict every exit. Version 2.x used `JMP` + `push [lit]; ret`, causing branch mispredictions on every call.
+- **Shared constant pool:** Sign masks and F16C tables are stored once at the start of `.fxcpt` and accessed via RIP-relative addressing.
+- **Full FMA3 support (`132`/`213`/`231`):** Exact operand semantics with zero stack spills when the destination is a multiplicand, and a compact 4–32 byte slot (instead of a full YMM register) when the destination is the addend.
+- **Smarter lane splits:** Reuses the destination register as the primary scratch register whenever the original instruction does not read it.
+- **Compact `VCVTPH2PS` lowering:** Reduced from 55/97 instructions down to **25 instructions (`xmm`) / 46 (`ymm`)** using pooled constants.
+- **Bidirectional neighbor stealing:** Relocates adjacent RIP-relative and `[rsp+x]` instructions forward or backward to make room for 5-byte `CALL` instructions, drastically reducing slow VEH fallbacks on 4-byte sites.
+- **Bugfixes from 2.x:**
+  - Fixed packed `231` FMA computing `2*a*b` (`FMADD`) and `0` (`FMSUB`).
+  - Fixed scalar `213` `FNMADD` with memory operands corrupting upper lanes, and zero-sign handling in `FNMSUB`/`FMSUBADD`.
+  - Fixed negative half-precision values in `VCVTPH2PS`, RIP-relative `VCVTPH2PS`, and `VCVTPS2PH` sites previously left unpatched.
+  - Fixed 16-bit `MOVBE` modifying `CF`/`OF` and `POPCNT` leaving `PF` set.
+
+### Verification & Test Coverage
+
+> [!IMPORTANT]
+> Only **FINAL FANTASY VII REBIRTH** has been extensively play-tested so far. Furthermore, while the original FX Reborn v6 build was play-tested end-to-end, **Ultra 3.0's output is structurally new** (`CALL`/`RET` stubs, rewritten FMA/F16C lowerings, aggressive neighbor stealing) and has not yet completed a full in-game playthrough. Treat new titles as experimental.
+
+- **37 AVX2 & BMI2 operations (`tests/selftest`):** Integer math, variable shifts, shuffles, permutes, gathers, pack/unpack, SAD, movemask, and `SHLX`/`SHRX`/`SARX`/`RORX`/`BZHI`/`PDEP`/`PEXT`/`MULX`. Verified on a real AMD FX-8350 across 3,000 random and edge-case inputs per operation against a plain-C reference, both as standalone `.exe` and loaded `.dll`.
+- **FMA3 / BMI1 / LZCNT / MOVBE (`tests/selftest/fma_*.cpp`):** 20 kernels—including accumulate (`231`) and Horner (`213`) loops—validated across 4,000 inputs each with exact cancellation and signed-zero checks.
+- **Native lowering suite (`tests/native`):** 11,005 test cases (~164,000 executions) plus a 38,400-case FMA register-aliasing sweep executed directly on AVX1 hardware from randomized register, flag, stack, and memory states, including forced backward neighbor steals, padding caves, and VEH fallbacks.
+- **FF7 Rebirth site coverage (`examples/ff7rebirth`):** 23,171 translation sites analyzed.
 
 ```bat
-:: lowering tests (any AVX CPU), about 10 minutes
+:: Run lowering validation on any AVX CPU (~10 minutes)
 python\python.exe tests\native\test_lowering.py
-:: end-to-end self-tests with MinGW-w64 GCC (or build.cmd with MSVC)
+
+:: Build and run end-to-end self-tests with MinGW-w64 GCC (or use build.cmd with MSVC)
 tests\selftest\build_gcc.cmd
 ```
 
-## Requirements
+### Requirements
 
-- **Windows x64.**
-- **Python:** the toolkit download includes Python 3.13. Running from source needs Python 3.13 plus `iced-x86==1.22.0` and `pefile==2024.8.26` in `engine/pylibs`.
-- **Rebuilding `fxcompat.dll`:** needs the Visual Studio C++ build tools. A prebuilt copy is in `runtime/`.
-- **Players' CPUs** need AVX, plus whatever else the game uses natively (FMA3, F16C, BMI1 and so on). The scan lists these.
+- **OS:** Windows 64-bit (x64 executables and DLLs).
+- **Python (for mod authors):** Bundled in the release download (Python 3.13). If running from source, install Python 3.13 with `iced-x86==1.22.0` and `pefile==2024.8.26` in `engine/pylibs`.
+- **C++ Build Tools (optional):** Only required if recompiling `fxcompat.dll` from source; a prebuilt binary is included in `runtime/`.
+- **End-user hardware:** Any CPU with **AVX** (all AVX CPUs also include baseline `SSE4.1`, `SSE4.2`, and `POPCNT`).
 
-## Quick start
+### Quick Start (CLI)
 
-Work on a copy of the game file, never inside the game folder. `fxkit` below means `fxkit.cmd`, or `py -3.13 fxkit.py`.
+Always work on a backup copy of the game binaries rather than directly inside the game directory. Below, `fxkit` refers to `fxkit.cmd` (or `py -3.13 fxkit.py`).
 
 ```bat
-:: 1. Is it feasible?
+:: 1. Scan the binary for feasibility and required features
 fxkit scan "D:\copy\Game.exe" --report scan.md
 
-:: 2. Does the game refuse to start on non-AVX2 CPUs? Find the check.
+:: 2. Locate startup CPU feature checks (e.g., AVX2 gates)
 fxkit gate "D:\copy\Game.exe"
 
-:: 3. Write game.json (see below), then convert and test.
+:: 3. Configure game.json (see schema below), then build and test
 fxkit build "D:\copy\Game.exe" -o out --config game.json
-::    copy out\Game.exe and out\fxcompat.dll into a TEST install of the game and play.
+:: Copy out\Game.exe and out\fxcompat.dll into a TEST copy of the game folder and launch.
 
-:: 4. If it closes with an illegal-instruction error, the miss is in fxreborn-missed.log:
+:: 4. If an illegal instruction occurs at runtime, feed the log back into the build
 fxkit build "D:\copy\Game.exe" -o out --config game.json --learned "D:\Game\fxreborn-missed.log"
 
-:: 5. When it works, freeze the tested site list as a known build (optional), then:
+:: 5. Package the mod for distribution
 fxkit package --config game.json -o dist
-::    -> dist\<ModName>-<version>.zip, ready to upload.
+:: Produces dist\<ModName>-<version>.zip
 ```
 
-Players unzip the package and run `Install or Update.cmd`, which:
-1. finds the game through Steam,
-2. checks their CPU,
-3. backs up the originals,
-4. builds the patch on their PC,
-5. and, after a game update, does all of that again when re-run.
+End users simply extract the `.zip` and run **`Install or Update.cmd`**, which locates the game via Steam, verifies their CPU capabilities, backs up original files, builds the patched binaries locally, and cleanly reapplies everything after game updates.
 
-## `game.json`
+### `game.json` Configuration
 
 ```json
 {
@@ -126,7 +131,10 @@ Players unzip the package and run `Install or Update.cmd`, which:
   "mod_version": "1.0.0",
   "game_title": "My Game",
   "steam_folder": "My Game",
-  "targets": ["Binaries/Win64/MyGame.exe", "Binaries/Win64/SomeEngine.dll"],
+  "targets": [
+    "Binaries/Win64/MyGame.exe",
+    "Binaries/Win64/SomeEngine.dll"
+  ],
   "process": "MyGame.exe",
   "cpu_features": ["AVX", "FMA", "F16C", "BMI1", "LZCNT"],
   "patches": [
@@ -140,69 +148,60 @@ Players unzip the package and run `Install or Update.cmd`, which:
     }
   ],
   "known_builds": {
-    "<sha256 of the ORIGINAL exe>": { "label": "Steam build 12345", "sites": "known_sites_12345.json" }
+    "<sha256_of_original_exe>": {
+      "label": "Steam build 12345",
+      "sites": "known_sites_12345.json"
+    }
   }
 }
 ```
 
-**Top-level fields:**
+#### Top-Level Fields
 
-| Field | What it is |
-|---|---|
-| `steam_folder` | The folder name under `steamapps\common`. |
-| `targets` | Files to convert, relative to that folder. Add DLLs that contain AVX2 code; the scan of each one tells you. |
-| `cpu_features` | What the installer requires from the player's CPU. Use the scan's "Other CPU features" list. Names are iced-x86's: `AVX`, `FMA`, `F16C`, `BMI1`, `LZCNT`, `POPCNT`, `SSE4_1`, `SSE4_2`, `MOVBE`, `AES` and so on. |
+| Field | Description |
+| :--- | :--- |
+| `steam_folder` | Directory name inside `steamapps\common`. |
+| `targets` | Relative paths to executables and DLLs requiring translation (check each file with `fxkit scan`). |
+| `cpu_features` | Baseline features verified on the player's CPU using `iced-x86` names (`AVX`, `SSE4_1`, `SSE4_2`, `POPCNT`, `AES`, etc.). |
 
-**`patches`** are byte patches that survive updates:
+#### Update-Proof Byte Patches (`patches`)
 
-| Field | What it is |
-|---|---|
-| `find` / `replace` | Hex bytes. `??` is a wildcard, and in `replace` it keeps the original byte. |
-| `near_string` | Only searches inside functions that reference this text, as ASCII or UTF-16. |
-| `expect` | The required number of matches. Anything else stops the install, so a changed game is never patched in the wrong place. |
+| Field | Description |
+| :--- | :--- |
+| `find` / `replace` | Hex byte patterns. Use `??` as a wildcard (in `replace`, `??` preserves the original byte). |
+| `near_string` | Restricts pattern matching to functions referencing this ASCII or UTF-16 string. |
+| `expect` | Exact number of expected matches. Aborts installation if the count differs, preventing bad patches on incompatible updates. |
 
-**`known_builds`** is optional. It maps the hash of an original file to a frozen, play-tested site list: `{"sites": ["0x1234", ...]}`, for example taken from a build manifest's `records`. Any other version is scanned on the player's PC and labelled UNVERIFIED.
+**`known_builds` (optional):** Maps the SHA-256 hash of an unmodified binary to a verified site list (`{"sites": ["0x1234", ...]}`). Unrecognized game versions are automatically scanned on the user's machine and flagged as `UNVERIFIED`.
 
-## How it works
+### Architecture
 
-1. **Find sites** (`engine/discover_code_sites.py`, `engine/find_sites.py`):
-   - Walks the program's control flow from its entry point, exports and exception-table functions.
-   - Code reached only through pointers is accepted after an automatic review: the reference must really point there, the code must decode cleanly, and the spot must not look like a jump table.
-   - Bytes found only by a linear sweep are never patched, because they may be data.
-2. **Lower** (`engine/avx2_lower.py`, `engine/bmi2_lower.py`, `engine/bmi2_extra.py`, `engine/sandy_lower.py`): each instruction becomes an AVX/SSE/x86-64 sequence that preserves every other register and the flags.
-3. **Patch** (`engine/build_static_mod.py`):
-   - Sites of 5 bytes or more `call` their replacement code in a new `.fxcpt` section, which returns with `ret`.
-   - Shorter ones are rewritten in place when the replacement fits.
-   - Otherwise they are fused with an adjacent site, or the next or previous ordinary instruction is moved into the stub so a `call` fits.
-   - Otherwise they jump through nearby padding.
-   - Otherwise they're left in place, and `fxcompat.dll`'s exception handler redirects them.
-   - Unwind data is generated for the new code.
-   - For DLLs, a small entry-point wrapper registers the module with the runtime.
-4. **Runtime** (`runtime/fxcompat_static.cpp`):
-   - A vectored exception handler that only redirects registered illegal-instruction addresses.
-   - It logs unregistered ones to `fxreborn-missed.log`.
-   - It doesn't spoof CPUID or inject into other processes.
+1. **Site Discovery (`engine/discover_code_sites.py`, `engine/find_sites.py`):** Traces control flow from the entry point, exports, and exception-table functions. Indirect/pointer-referenced targets are validated for clean decoding and jump-table exclusion. Raw linear-sweep candidates are never patched statically to avoid corrupting embedded data.
+2. **Instruction Lowering (`engine/avx2_lower.py`, `engine/bmi2_lower.py`, `engine/bmi2_extra.py`, `engine/sandy_lower.py`):** Translates each unsupported instruction into an AVX/SSE/x86-64 sequence while preserving all non-destination registers and CPU flags.
+3. **Static Binary Patching (`engine/build_static_mod.py`):**
+   - Sites `>= 5` bytes are replaced with a `CALL` to a stub in a new `.fxcpt` section, ending with `RET`.
+   - Shorter sites (`< 5` bytes) are rewritten inline if space permits, fused with adjacent sites, or expanded by relocating a neighboring instruction into the stub; remaining sites route through nearby padding or fall back to the runtime handler.
+   - Generates Windows x64 unwind metadata for `.fxcpt` and injects an entry-point wrapper into patched DLLs to register them with the runtime.
+4. **Runtime Handler (`runtime/fxcompat_static.cpp`):** A lightweight Vectored Exception Handler (VEH) that redirects only registered illegal-instruction addresses, logs any missed addresses to `fxreborn-missed.log`, and avoids global `CPUID` spoofing or external process injection.
 
-## Limits and warnings
+### Limitations & Warnings
 
-- **AVX-512 isn't translated.** Some AVX2 forms aren't supported yet; the scan lists any it finds, and `engine/avx2_lower.py` is where to add them.
-- **Translated code is slower than native AVX2.** On FX Reborn it was about 1% of CPU time, but games that lean heavily on wide integer AVX2 will notice more.
-- **Online games and anti-cheat:** modified executables can trip anti-cheat or integrity checks and get accounts banned. Don't use this on games with anti-cheat or online-only components unless the developer allows it.
-- **DRM-wrapped executables** may need the DRM's own requirements respected, or may not be convertible at all.
-- **Each mod's README should say** that it modifies the game exe. Distribute only your config, site lists and the toolkit, never game files.
+> [!WARNING]
+> **Anti-cheat & online games:** Modifying game binaries will trigger anti-cheat or file-integrity protections and can result in account bans. Never use this toolkit on online multiplayer games.
 
-## Credits and license
+- **Unsupported extensions:** **AVX-512** is not translated, and a few rare AVX2 forms remain unimplemented (reported by `fxkit scan`; extensible in `engine/avx2_lower.py`).
+- **Performance overhead:** Translated routines are slower than native hardware execution (~1% CPU overhead in *FF7 Rebirth*, though titles heavily reliant on wide integer AVX2 loops will see greater impact).
+- **DRM & obfuscation:** Binaries protected by aggressive self-checking DRM or packers may fail to launch after modification.
+- **Distribution policy:** State clearly in your mod's README that it patches game executables. Distribute only your configuration files, site lists, and this toolkit—**never redistribute game binaries**.
 
-MIT (see `LICENSE`).
+### Credits & License
 
-- **Patrick McCoy (mcirish3):** project direction and testing.
-- **Code** was largely AI-generated (OpenAI Codex for FX Reborn v1–v6; Anthropic Claude for the update-proof patcher, this toolkit and the extra BMI2 lowerings), then tested locally on an FX-8350.
-- **Libraries:** iced-x86 and pefile (MIT). Python 3.13 (PSF license) is included in the release download.
+Licensed under the **MIT License** (see `LICENSE`).
 
-## Related projects / Projetos relacionados
+- **Patrick McCoy (`mcirish3`):** Project direction, architecture, and hardware testing.
+- **Code generation & tooling:** Built with AI assistance (OpenAI Codex for FX Reborn v1–v6; Anthropic Claude for the update-proof patcher, toolkit architecture, and extended BMI2 lowerings) and validated on an AMD FX-8350.
+- **Dependencies:** [iced-x86](https://github.com/icedland/iced) (MIT), [pefile](https://github.com/erocarrera/pefile) (MIT), and Python 3.13 (PSF License).
 
-- **FX-Reborn-F16C-Ultra 3.0** — simpler tool for games that only need **F16C** (e.g. Ghost of Tsushima on Sandy Bridge). / Ferramenta mais simples para jogos que só exigem F16C.
+### Related Projects
 
-## Search terms / Termos de busca
-
-AVX2 emulator · AVX2 emulation · emulador AVX2 · run AVX2 game on AVX CPU · rodar jogo AVX2 em processador sem AVX2 · CPU does not support AVX2 · processador não suporta AVX2 · AVX2 fix · FMA3 emulation · F16C emulation · BMI2 emulation · Intel SDE alternative · alternativa ao Intel SDE · illegal instruction fix · instrução ilegal · 0xC000001D · Final Fantasy VII Rebirth AVX2 fix · FF7 Rebirth i7-2600 · FF7 Rebirth AMD FX · FX-8350 · FX-6300 · FX-8150 · i7-2600 · i5-2500K · i5-2400 · i7-3770 · Sandy Bridge · Ivy Bridge · Piledriver · Bulldozer · old CPU game mod · mod para processador antigo · jogo não abre · game won't start
+- **[FX-Reborn-F16C-Ultra 3.0](https://github.com/mcirish3/FX-Reborn-F16C-Ultra)** — Lightweight single-binary patcher for games that only require **F16C** (such as *Ghost of Tsushima* on Sandy Bridge).
