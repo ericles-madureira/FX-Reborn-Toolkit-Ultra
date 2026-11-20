@@ -55,7 +55,7 @@ O pacote já inclui o **Python 3.13 portátil embarcado** na pasta `python/`, al
 
 1. Extraia o arquivo `FX-Reborn-Toolkit-Ultra-3.0.zip` em uma pasta de sua preferência (ex.: `C:\FX-Reborn-Toolkit-Ultra`).
 
-2. Dê um **duplo-clique** no arquivo **`Iniciar_Interface_GUI.cmd`**.
+2. Dê um **duplo-clique** no arquivo **`Open- Iniciar_Interface_GUI.cmd`**.
 
 3. Uma janela gráfica em **Modo Escuro (Dark Mode)** será aberta automaticamente mostrando os recursos que o processador do seu PC possui no topo da tela.
 

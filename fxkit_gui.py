@@ -46,6 +46,11 @@ JOB_STATE = {
 }
 
 
+def tr(lang: str, pt: str, en: str) -> str:
+    """Pick the Portuguese or English text for GUI log messages / Escolhe o texto PT ou EN."""
+    return en if lang == "en" else pt
+
+
 def append_log(msg: str):
     with JOB_LOCK:
         ts = time.strftime("%H:%M:%S")
@@ -179,7 +184,7 @@ def native_select_folder_dialog(title: str = "Selecionar Pasta de Saída") -> st
         return ""
 
 
-def run_async_job(task_name: str, fn):
+def run_async_job(task_name: str, fn, lang: str = "pt"):
     with JOB_LOCK:
         if JOB_STATE["running"]:
             return False
@@ -187,7 +192,7 @@ def run_async_job(task_name: str, fn):
         JOB_STATE["task"] = task_name
         JOB_STATE["error"] = None
         JOB_STATE["logs"] = []
-        JOB_STATE["status"] = f"Iniciando {task_name}..."
+        JOB_STATE["status"] = tr(lang, f"Iniciando {task_name}...", f"Starting {task_name}...")
 
     def worker():
         old_out, old_err = sys.stdout, sys.stderr
@@ -195,10 +200,15 @@ def run_async_job(task_name: str, fn):
         sys.stderr = LogRedirector(old_err)
         try:
             fn()
-            append_log(f"Tarefa '{task_name}' concluída com sucesso!")
+            append_log(tr(lang, f"Tarefa '{task_name}' concluída com sucesso!", f"Task '{task_name}' finished successfully!"))
         except Exception as exc:
-            tb = traceback.format_exc()
-            append_log(f"ERRO: {exc}")
+            try:
+                tb = traceback.format_exc()
+            except Exception:
+                # The bundled Python has no `unicodedata`, which traceback needs to
+                # format lines with accented characters; fall back to a short form.
+                tb = f"{type(exc).__name__}: {exc}"
+            append_log(tr(lang, f"ERRO: {exc}", f"ERROR: {exc}"))
             with JOB_LOCK:
                 JOB_STATE["error"] = f"{exc}\n{tb}"
         finally:
@@ -271,6 +281,16 @@ HTML_UI = r"""<!DOCTYPE html>
     font-size: 13px;
     margin-top: 3px;
   }
+  .lang-switch { display: flex; gap: 4px; margin: 0 14px 0 auto; }
+  .lang-btn {
+    font-size: 11px;
+    padding: 4px 9px;
+    border-radius: 6px;
+    background: var(--bg-card);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+  }
+  .lang-btn.active { color: #090d16; background: var(--accent); border-color: var(--accent); }
   .cpu-pills {
     display: flex;
     flex-wrap: wrap;
@@ -509,10 +529,14 @@ HTML_UI = r"""<!DOCTYPE html>
       FX Reborn Toolkit
       <span class="badge-ultra">v3.0 ULTRA</span>
     </h1>
-    <p>Reescritor Estático & Emulador AOT de Instruções AVX2, FMA3, F16C, BMI1/2, LZCNT, MOVBE e POPCNT</p>
+    <p data-i18n="subtitle">Reescritor Estático & Emulador AOT de Instruções AVX2, FMA3, F16C, BMI1/2, LZCNT, MOVBE e POPCNT</p>
+  </div>
+  <div class="lang-switch" title="Idioma / Language">
+    <button id="langPt" class="lang-btn" onclick="setLang('pt')">PT-BR</button>
+    <button id="langEn" class="lang-btn" onclick="setLang('en')">EN</button>
   </div>
   <div id="cpuPills" class="cpu-pills">
-    <span class="cpu-pill">Detectando CPU...</span>
+    <span class="cpu-pill" data-i18n="detecting">Detectando CPU...</span>
   </div>
 </header>
 
@@ -520,31 +544,31 @@ HTML_UI = r"""<!DOCTYPE html>
   <!-- LEFT COLUMN: CONFIGURATION & ACTIONS -->
   <div>
     <div class="card">
-      <h2>1. Selecionar Executável / DLL e Pasta de Saída</h2>
+      <h2 data-i18n="card1">1. Selecionar Executável / DLL e Pasta de Saída</h2>
       <div class="field-group">
-        <label>Arquivo Executável ou DLL Original (.exe / .dll):</label>
+        <label data-i18n="lblExe">Arquivo Executável ou DLL Original (.exe / .dll):</label>
         <div class="input-row">
-          <input type="text" id="exePath" placeholder="Ex: C:\Games\FF7Rebirth\End\Binaries\Win64\ff7rebirth_.exe">
-          <button class="btn-secondary" onclick="browseFile('exePath', 'exe')">Procurar .EXE/.DLL</button>
+          <input type="text" id="exePath" data-i18n-ph="phExe" placeholder="Ex: C:\Games\FF7Rebirth\End\Binaries\Win64\ff7rebirth_.exe">
+          <button class="btn-secondary" data-i18n="btnBrowseExe" onclick="browseFile('exePath', 'exe')">Procurar .EXE/.DLL</button>
         </div>
       </div>
 
       <div class="field-group">
-        <label>Pasta de Saída (onde o novo executável otimizado + fxcompat.dll serão salvos):</label>
+        <label data-i18n="lblOut">Pasta de Saída (onde o novo executável otimizado + fxcompat.dll serão salvos):</label>
         <div class="input-row">
-          <input type="text" id="outDir" placeholder="Ex: C:\Games\FF7Rebirth_Patched">
-          <button class="btn-secondary" onclick="browseFolder('outDir')">Procurar Pasta</button>
+          <input type="text" id="outDir" data-i18n-ph="phOut" placeholder="Ex: C:\Games\FF7Rebirth_Patched">
+          <button class="btn-secondary" data-i18n="btnBrowseFolder" onclick="browseFolder('outDir')">Procurar Pasta</button>
         </div>
       </div>
 
       <div class="field-group">
-        <label>Configuração Opcional (game.json) e Log de Instruções Aprendidas (fxreborn-missed.log):</label>
+        <label data-i18n="lblCfg">Configuração Opcional (game.json) e Log de Instruções Aprendidas (fxreborn-missed.log):</label>
         <div class="input-row" style="margin-bottom: 6px;">
-          <input type="text" id="configPath" placeholder="Opcional: examples\ff7rebirth\game.json (patches de check de CPU e builds conhecidas)">
+          <input type="text" id="configPath" data-i18n-ph="phCfg" placeholder="Opcional: examples\ff7rebirth\game.json (patches de check de CPU e builds conhecidas)">
           <button class="btn-secondary" onclick="browseFile('configPath', 'json')">game.json</button>
         </div>
         <div class="input-row">
-          <input type="text" id="learnedPath" placeholder="Opcional: fxreborn-missed.log (adiciona endereços extras capturados em runtime)">
+          <input type="text" id="learnedPath" data-i18n-ph="phLearned" placeholder="Opcional: fxreborn-missed.log (adiciona endereços extras capturados em runtime)">
           <button class="btn-secondary" onclick="browseFile('learnedPath', 'log')">missed.log</button>
         </div>
       </div>
@@ -552,13 +576,13 @@ HTML_UI = r"""<!DOCTYPE html>
 
     <div class="card">
       <h2>
-        <span>2.Conjuntos de Instruções para Simular / Emular (AOT)</span>
+        <span data-i18n="card2">2. Conjuntos de Instruções para Simular / Emular (AOT)</span>
       </h2>
       <div class="preset-bar">
-        <button class="preset-btn" onclick="applyPreset('sandy')">Preset: Intel 2ª Ger. (Sandy Bridge i7-2600 / i5-2500)</button>
-        <button class="preset-btn" onclick="applyPreset('ivy')">Preset: Intel 3ª Ger. (Ivy Bridge i7-3770)</button>
-        <button class="preset-btn" onclick="applyPreset('fx')">Preset: AMD FX (FX-8350 / FX-6300)</button>
-        <button class="preset-btn" onclick="applyPreset('all')">Selecionar Todas</button>
+        <button class="preset-btn" data-i18n="presetSandy" onclick="applyPreset('sandy')">Preset: Intel 2ª Ger. (Sandy Bridge i7-2600 / i5-2500)</button>
+        <button class="preset-btn" data-i18n="presetIvy" onclick="applyPreset('ivy')">Preset: Intel 3ª Ger. (Ivy Bridge i7-3770)</button>
+        <button class="preset-btn" data-i18n="presetFx" onclick="applyPreset('fx')">Preset: AMD FX (FX-8350 / FX-6300)</button>
+        <button class="preset-btn" data-i18n="presetAll" onclick="applyPreset('all')">Selecionar Todas</button>
       </div>
 
       <div class="features-grid">
@@ -566,82 +590,82 @@ HTML_UI = r"""<!DOCTYPE html>
           <input type="checkbox" class="feat-chk" value="AVX2" checked>
           <div>
             <div class="feat-title">AVX2 ★</div>
-            <div class="feat-desc">Vetores 256-bit Inteiros, Broadcasts, Gathers, Permutes</div>
+            <div class="feat-desc" data-i18n="dAvx2">Vetores 256-bit Inteiros, Broadcasts, Gathers, Permutes</div>
           </div>
         </label>
         <label class="feat-box primary-feat">
           <input type="checkbox" class="feat-chk" value="FMA" checked>
           <div>
             <div class="feat-title">FMA3 ★</div>
-            <div class="feat-desc">Fused Multiply-Add (VFMADD / VFMSUB / VFNMADD)</div>
+            <div class="feat-desc" data-i18n="dFma">Fused Multiply-Add (VFMADD / VFMSUB / VFNMADD)</div>
           </div>
         </label>
         <label class="feat-box primary-feat">
           <input type="checkbox" class="feat-chk" value="F16C" checked>
           <div>
             <div class="feat-title">F16C ★</div>
-            <div class="feat-desc">Conversão Half-Float (VCVTPH2PS / VCVTPS2PH SIMD)</div>
+            <div class="feat-desc" data-i18n="dF16c">Conversão Half-Float (VCVTPH2PS / VCVTPS2PH SIMD)</div>
           </div>
         </label>
         <label class="feat-box primary-feat">
           <input type="checkbox" class="feat-chk" value="BMI2" checked>
           <div>
             <div class="feat-title">BMI2 ★</div>
-            <div class="feat-desc">SHLX, SHRX, SARX, BZHI, RORX, MULX, PDEP, PEXT</div>
+            <div class="feat-desc" data-i18n="dBmi2">SHLX, SHRX, SARX, BZHI, RORX, MULX, PDEP, PEXT</div>
           </div>
         </label>
         <label class="feat-box">
           <input type="checkbox" class="feat-chk" value="BMI1" checked>
           <div>
             <div class="feat-title">BMI1</div>
-            <div class="feat-desc">ANDN (In-Place), BLSI, BLSMSK, BLSR, BEXTR, TZCNT</div>
+            <div class="feat-desc" data-i18n="dBmi1">ANDN (In-Place), BLSI, BLSMSK, BLSR, BEXTR, TZCNT</div>
           </div>
         </label>
         <label class="feat-box">
           <input type="checkbox" class="feat-chk" value="LZCNT" checked>
           <div>
             <div class="feat-title">LZCNT</div>
-            <div class="feat-desc">Contagem de zeros à esquerda via BSR + XOR</div>
+            <div class="feat-desc" data-i18n="dLzcnt">Contagem de zeros à esquerda via BSR + XOR</div>
           </div>
         </label>
         <label class="feat-box">
           <input type="checkbox" class="feat-chk" value="MOVBE" checked>
           <div>
             <div class="feat-title">MOVBE</div>
-            <div class="feat-desc">Troca Big-Endian em leitura/escrita via BSWAP</div>
+            <div class="feat-desc" data-i18n="dMovbe">Troca Big-Endian em leitura/escrita via BSWAP</div>
           </div>
         </label>
         <label class="feat-box">
           <input type="checkbox" class="feat-chk" value="POPCNT">
           <div>
             <div class="feat-title">POPCNT</div>
-            <div class="feat-desc">Contagem de bits paralela SWAR (p/ CPUs muito antigas)</div>
+            <div class="feat-desc" data-i18n="dPopcnt">Contagem de bits paralela SWAR (p/ CPUs muito antigas)</div>
           </div>
         </label>
       </div>
 
-      <h2 style="margin-top: 14px;">3. Otimizações de Desempenho Ultra</h2>
+      <h2 style="margin-top: 14px;" data-i18n="card3">3. Otimizações de Desempenho Ultra</h2>
       <div class="opts-grid">
         <label class="feat-box">
           <input type="checkbox" id="optFusion" checked>
           <div>
-            <div class="feat-title">Fusão de Básico-Blocos (Cluster Fusion)</div>
-            <div class="feat-desc">Agrupa instruções consecutivas em uma única chamada CALL/RET (prevista pelo processador), eliminando milhares de desvios e exceções VEH.</div>
+            <div class="feat-title" data-i18n="tFusion">Fusão de Básico-Blocos (Cluster Fusion)</div>
+            <div class="feat-desc" data-i18n="dFusion">Agrupa instruções consecutivas em uma única chamada CALL/RET (prevista pelo processador), eliminando milhares de desvios e exceções VEH.</div>
           </div>
         </label>
         <label class="feat-box">
           <input type="checkbox" id="optSteal" checked>
           <div>
-            <div class="feat-title">Roubo Seguro de Vizinho 4-Bytes (Zero-VEH)</div>
-            <div class="feat-desc">Incorpora a instrução vizinha (seguinte ou anterior) em sites AVX2 de 4 bytes isolados para usar CALL nativo em vez de exceção VEH.</div>
+            <div class="feat-title" data-i18n="tSteal">Roubo Seguro de Vizinho 4-Bytes (Zero-VEH)</div>
+            <div class="feat-desc" data-i18n="dSteal">Incorpora a instrução vizinha (seguinte ou anterior) em sites AVX2 de 4 bytes isolados para usar CALL nativo em vez de exceção VEH.</div>
           </div>
         </label>
       </div>
 
       <div class="action-bar">
-        <button class="btn-primary" id="btnScan" onclick="startScan()">1. Analisar Executável (Scan)</button>
-        <button class="btn-secondary" id="btnGate" onclick="startGate()">2. Detectar Trava de CPU (Gate)</button>
-        <button class="btn-success" id="btnBuild" onclick="startBuild()">⚡ 3. Gerar Executável Modificado & Otimizado</button>
+        <button class="btn-primary" id="btnScan" data-i18n="btnScan" onclick="startScan()">1. Analisar Executável (Scan)</button>
+        <button class="btn-secondary" id="btnGate" data-i18n="btnGate" onclick="startGate()">2. Detectar Trava de CPU (Gate)</button>
+        <button class="btn-success" id="btnBuild" data-i18n="btnBuild" onclick="startBuild()">⚡ 3. Gerar Executável Modificado & Otimizado</button>
       </div>
     </div>
   </div>
@@ -649,36 +673,36 @@ HTML_UI = r"""<!DOCTYPE html>
   <!-- RIGHT COLUMN: TELEMETRY, LOGS & SCAN REPORT -->
   <div>
     <div class="card">
-      <h2>Status de Execução & Console em Tempo Real</h2>
+      <h2 data-i18n="cardStatus">Status de Execução & Console em Tempo Real</h2>
       <div class="status-banner">
         <div>
           <span id="statusDot" class="dot"></span>
-          <strong id="statusText">Pronto para analisar ou construir</strong>
+          <strong id="statusText" data-i18n="statusReady">Pronto para analisar ou construir</strong>
         </div>
         <span id="taskBadge" style="font-family: var(--mono); font-size: 11px; color: var(--text-muted);">IDLE</span>
       </div>
-      <div id="logConsole" class="terminal">Bem-vindo ao FX Reborn Toolkit Ultra v3.0!
+      <div id="logConsole" class="terminal" data-i18n="welcome">Bem-vindo ao FX Reborn Toolkit Ultra v3.0!
 Selecione um executável (.exe ou .dll) à esquerda para escanear todas as instruções (AVX2, FMA3, F16C, BMI1/2, LZCNT, MOVBE, POPCNT) ou gerar diretamente o novo executável otimizado.</div>
     </div>
 
     <div class="card">
-      <h2>Resumo de Instruções Encontradas & Traduzidas</h2>
+      <h2 data-i18n="cardSummary">Resumo de Instruções Encontradas & Traduzidas</h2>
       <div class="kpi-row">
         <div class="kpi-card">
           <div class="kpi-val" id="kpiTotal">—</div>
-          <div class="kpi-lbl">Instruções Alvo</div>
+          <div class="kpi-lbl" data-i18n="kTotal">Instruções Alvo</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-val" id="kpiInPlace">—</div>
-          <div class="kpi-lbl">In-Place / Fused</div>
+          <div class="kpi-lbl" data-i18n="kInPlace">In-Place / Fused</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-val" id="kpiJumps">—</div>
-          <div class="kpi-lbl">Saltos Nativos</div>
+          <div class="kpi-lbl" data-i18n="kJumps">Saltos Nativos</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-val" id="kpiVeh">—</div>
-          <div class="kpi-lbl">Exceções VEH</div>
+          <div class="kpi-lbl" data-i18n="kVeh">Exceções VEH</div>
         </div>
       </div>
 
@@ -686,13 +710,13 @@ Selecione um executável (.exe ou .dll) à esquerda para escanear todas as instr
         <table class="data-table">
           <thead>
             <tr>
-              <th>Instrução / Conjunto</th>
-              <th style="text-align:right;">Ocorrências</th>
-              <th>Status</th>
+              <th data-i18n="thInstr">Instrução / Conjunto</th>
+              <th style="text-align:right;" data-i18n="thCount">Ocorrências</th>
+              <th data-i18n="thStatus">Status</th>
             </tr>
           </thead>
           <tbody id="reportTableBody">
-            <tr><td colspan="3" style="color: var(--text-muted); text-align:center; padding: 18px;">Execute "Analisar Executável (Scan)" ou "Gerar Executável" para visualizar o inventário detalhado de instruções encontradas no arquivo.</td></tr>
+            <tr><td colspan="3" style="color: var(--text-muted); text-align:center; padding: 18px;" data-i18n="emptyTable">Execute "Analisar Executável (Scan)" ou "Gerar Executável" para visualizar o inventário detalhado de instruções encontradas no arquivo.</td></tr>
           </tbody>
         </table>
       </div>
@@ -700,6 +724,127 @@ Selecione um executável (.exe ou .dll) à esquerda para escanear todas as instr
   </div>
 </div>
 
+<script>
+// ---------------------------------------------------------------------------
+// Idiomas da interface / Interface languages (Português do Brasil + English)
+// O texto em português fica no próprio HTML; aqui ficam as traduções em inglês
+// e os textos usados pelo JavaScript.
+// ---------------------------------------------------------------------------
+const I18N = {
+  en: {
+    docTitle: 'FX Reborn Toolkit Ultra v3.0 — Static Emulator & AVX2 / FMA / F16C / BMI Optimizer',
+    subtitle: 'Static Rewriter & AOT Emulator for AVX2, FMA3, F16C, BMI1/2, LZCNT, MOVBE and POPCNT instructions',
+    detecting: 'Detecting CPU...',
+    card1: '1. Select Executable / DLL and Output Folder',
+    lblExe: 'Original Executable or DLL file (.exe / .dll):',
+    phExe: 'e.g. C:\\Games\\FF7Rebirth\\End\\Binaries\\Win64\\ff7rebirth_.exe',
+    btnBrowseExe: 'Browse .EXE/.DLL',
+    lblOut: 'Output Folder (where the new optimized executable + fxcompat.dll will be saved):',
+    phOut: 'e.g. C:\\Games\\FF7Rebirth_Patched',
+    btnBrowseFolder: 'Browse Folder',
+    lblCfg: 'Optional Config (game.json) and Learned Instructions Log (fxreborn-missed.log):',
+    phCfg: 'Optional: examples\\ff7rebirth\\game.json (CPU-check patches and known builds)',
+    phLearned: 'Optional: fxreborn-missed.log (adds extra addresses captured at runtime)',
+    card2: '2. Instruction Sets to Simulate / Emulate (AOT)',
+    presetSandy: 'Preset: Intel 2nd Gen (Sandy Bridge i7-2600 / i5-2500)',
+    presetIvy: 'Preset: Intel 3rd Gen (Ivy Bridge i7-3770)',
+    presetFx: 'Preset: AMD FX (FX-8350 / FX-6300)',
+    presetAll: 'Select All',
+    dAvx2: '256-bit integer vectors, broadcasts, gathers, permutes',
+    dFma: 'Fused Multiply-Add (VFMADD / VFMSUB / VFNMADD)',
+    dF16c: 'Half-float conversion (VCVTPH2PS / VCVTPS2PH SIMD)',
+    dBmi2: 'SHLX, SHRX, SARX, BZHI, RORX, MULX, PDEP, PEXT',
+    dBmi1: 'ANDN (in-place), BLSI, BLSMSK, BLSR, BEXTR, TZCNT',
+    dLzcnt: 'Leading-zero count via BSR + XOR',
+    dMovbe: 'Big-endian swap on load/store via BSWAP',
+    dPopcnt: 'Parallel SWAR bit count (for very old CPUs)',
+    card3: '3. Ultra Performance Optimizations',
+    tFusion: 'Basic-Block Fusion (Cluster Fusion)',
+    dFusion: 'Groups consecutive instructions into a single CALL/RET (predicted by the CPU), removing thousands of jumps and VEH exceptions.',
+    tSteal: 'Safe 4-Byte Neighbor Stealing (Zero-VEH)',
+    dSteal: 'Moves the neighboring instruction (next or previous) into isolated 4-byte AVX2 sites so they use a native CALL instead of a VEH exception.',
+    btnScan: '1. Analyze Executable (Scan)',
+    btnGate: '2. Detect CPU Check (Gate)',
+    btnBuild: '⚡ 3. Build Modified & Optimized Executable',
+    cardStatus: 'Execution Status & Live Console',
+    statusReady: 'Ready to analyze or build',
+    welcome: 'Welcome to FX Reborn Toolkit Ultra v3.0!\nSelect an executable (.exe or .dll) on the left to scan all instructions (AVX2, FMA3, F16C, BMI1/2, LZCNT, MOVBE, POPCNT) or build the new optimized executable directly.',
+    cardSummary: 'Found & Translated Instructions Summary',
+    kTotal: 'Target Instructions',
+    kInPlace: 'In-Place / Fused',
+    kJumps: 'Native Jumps',
+    kVeh: 'VEH Exceptions',
+    thInstr: 'Instruction / Set',
+    thCount: 'Occurrences',
+    thStatus: 'Status',
+    emptyTable: 'Run "Analyze Executable (Scan)" or "Build Executable" to see the detailed inventory of instructions found in the file.',
+    pillHas: 'Natively supported by your CPU',
+    pillMiss: 'Missing on your CPU (needs to be emulated)',
+    alertFile: 'Enter the path of the executable or DLL.',
+    alertFileOut: 'Enter the executable file (.exe/.dll) and the output folder!',
+    rowMethod: 'Method:',
+    rowApplied: 'Applied ✓',
+    rowSet: 'Set',
+    rowDetected: 'Detected',
+    rowSupported: 'Supported ✓',
+    rowNone: 'No target instructions found.',
+    statusIdle: 'Ready',
+    badgeRunning: 'RUNNING:',
+    badgeReady: 'READY',
+  },
+  pt: {
+    pillHas: 'Suportado nativamente pela sua CPU',
+    pillMiss: 'Ausente na sua CPU (precisa ser emulado)',
+    alertFile: 'Informe o caminho do executável ou DLL.',
+    alertFileOut: 'Informe o arquivo executável (.exe/.dll) e a pasta de saída!',
+    rowMethod: 'Método:',
+    rowApplied: 'Aplicado ✓',
+    rowSet: 'Conjunto',
+    rowDetected: 'Detectado',
+    rowSupported: 'Suportado ✓',
+    rowNone: 'Nenhuma instrução alvo encontrada.',
+    statusIdle: 'Pronto',
+    badgeRunning: 'EXECUTANDO:',
+    badgeReady: 'PRONTO',
+  },
+};
+let LANG = 'pt';
+let LAST_STATE = null;
+
+function t(key) {
+  return (I18N[LANG] && I18N[LANG][key]) || I18N.pt[key] || key;
+}
+
+function initLang() {
+  // Guarda o texto original (português) de cada elemento antes de traduzir
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.dataset.pt = el.textContent; });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.dataset.ptPh = el.placeholder; });
+  I18N.pt.docTitle = document.title;
+  let saved = null;
+  try { saved = localStorage.getItem('fxkit-lang'); } catch (e) {}
+  const browser = (navigator.language || 'pt').toLowerCase();
+  setLang(saved || (browser.startsWith('pt') ? 'pt' : 'en'));
+}
+
+function setLang(lang) {
+  LANG = (lang === 'en') ? 'en' : 'pt';
+  try { localStorage.setItem('fxkit-lang', LANG); } catch (e) {}
+  document.documentElement.lang = (LANG === 'en') ? 'en' : 'pt-BR';
+  document.title = t('docTitle');
+  const busy = LAST_STATE && LAST_STATE.logs && LAST_STATE.logs.length;
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    if (busy && (el.id === 'logConsole' || el.id === 'statusText')) return;  // keep live output
+    el.textContent = (LANG === 'pt') ? el.dataset.pt : (I18N.en[el.dataset.i18n] || el.dataset.pt);
+  });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => {
+    el.placeholder = (LANG === 'pt') ? el.dataset.ptPh : (I18N.en[el.dataset.i18nPh] || el.dataset.ptPh);
+  });
+  document.getElementById('langPt').classList.toggle('active', LANG === 'pt');
+  document.getElementById('langEn').classList.toggle('active', LANG === 'en');
+  fetchCpuInfo();
+  if (LAST_STATE) renderTables(LAST_STATE);
+}
+</script>
 <script>
 let pollTimer = null;
 
@@ -715,7 +860,7 @@ async function fetchCpuInfo() {
       const span = document.createElement('span');
       span.className = 'cpu-pill ' + (has ? 'has' : 'miss');
       span.textContent = k + (has ? ' ✓' : ' ✗');
-      span.title = has ? 'Suportado nativamente pela sua CPU' : 'Ausente na sua CPU (precisa ser emulado)';
+      span.title = has ? t('pillHas') : t('pillMiss');
       container.appendChild(span);
     });
   } catch (e) {}
@@ -762,23 +907,23 @@ async function browseFolder(inputId) {
 
 async function startScan() {
   const file = document.getElementById('exePath').value.trim();
-  if (!file) { alert('Informe o caminho do executável ou DLL.'); return; }
+  if (!file) { alert(t('alertFile')); return; }
   const feats = getSelectedFeatures();
   await fetch('/api/scan', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ file, popcnt: feats.includes('POPCNT') })
+    body: JSON.stringify({ file, popcnt: feats.includes('POPCNT'), lang: LANG })
   });
   startPolling();
 }
 
 async function startGate() {
   const file = document.getElementById('exePath').value.trim();
-  if (!file) { alert('Informe o caminho do executável ou DLL.'); return; }
+  if (!file) { alert(t('alertFile')); return; }
   await fetch('/api/gate', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ file })
+    body: JSON.stringify({ file, lang: LANG })
   });
   startPolling();
 }
@@ -787,7 +932,7 @@ async function startBuild() {
   const file = document.getElementById('exePath').value.trim();
   const out = document.getElementById('outDir').value.trim();
   if (!file || !out) {
-    alert('Informe o arquivo executável (.exe/.dll) e a pasta de saída!');
+    alert(t('alertFileOut'));
     return;
   }
   const payload = {
@@ -797,7 +942,8 @@ async function startBuild() {
     learned: document.getElementById('learnedPath').value.trim(),
     features: getSelectedFeatures(),
     fusion: document.getElementById('optFusion').checked,
-    neighbor_steal: document.getElementById('optSteal').checked
+    neighbor_steal: document.getElementById('optSteal').checked,
+    lang: LANG
   };
   await fetch('/api/build', {
     method: 'POST',
@@ -822,7 +968,7 @@ function renderTables(state) {
 
     let rows = '';
     for (const [k, v] of Object.entries(m)) {
-      rows += `<tr><td>Método: <strong>${k}</strong></td><td class="num">${v.toLocaleString()}</td><td><span style="color:var(--success)">Aplicado ✓</span></td></tr>`;
+      rows += `<tr><td>${t('rowMethod')} <strong>${k}</strong></td><td class="num">${v.toLocaleString()}</td><td><span style="color:var(--success)">${t('rowApplied')}</span></td></tr>`;
     }
     tbody.innerHTML = rows;
     return;
@@ -837,15 +983,15 @@ function renderTables(state) {
     let rows = '';
     if (s.by_feature) {
       for (const [f, cnt] of Object.entries(s.by_feature)) {
-        rows += `<tr style="background:rgba(56,189,248,0.08)"><td><strong>Conjunto ${f}</strong></td><td class="num">${cnt.toLocaleString()}</td><td><span style="color:var(--accent)">Detectado</span></td></tr>`;
+        rows += `<tr style="background:rgba(56,189,248,0.08)"><td><strong>${t('rowSet')} ${f}</strong></td><td class="num">${cnt.toLocaleString()}</td><td><span style="color:var(--accent)">${t('rowDetected')}</span></td></tr>`;
       }
     }
     if (s.by_mnemonic) {
       for (const [mn, cnt] of Object.entries(s.by_mnemonic)) {
-        rows += `<tr><td style="font-family:var(--mono)">${mn}</td><td class="num">${cnt.toLocaleString()}</td><td><span style="color:var(--success)">Suportado ✓</span></td></tr>`;
+        rows += `<tr><td style="font-family:var(--mono)">${mn}</td><td class="num">${cnt.toLocaleString()}</td><td><span style="color:var(--success)">${t('rowSupported')}</span></td></tr>`;
       }
     }
-    tbody.innerHTML = rows || '<tr><td colspan="3">Nenhuma instrução alvo encontrada.</td></tr>';
+    tbody.innerHTML = rows || '<tr><td colspan="3">' + t('rowNone') + '</td></tr>';
   }
 }
 
@@ -859,8 +1005,8 @@ async function pollStatus() {
     const term = document.getElementById('logConsole');
 
     dot.className = 'dot' + (state.running ? ' busy' : '');
-    txt.textContent = state.status || 'Pronto';
-    badge.textContent = state.running ? ('EXECUTANDO: ' + (state.task || '')) : 'PRONTO';
+    txt.textContent = state.status || t('statusIdle');
+    badge.textContent = state.running ? (t('badgeRunning') + ' ' + (state.task || '')) : t('badgeReady');
 
     document.getElementById('btnScan').disabled = state.running;
     document.getElementById('btnGate').disabled = state.running;
@@ -870,6 +1016,7 @@ async function pollStatus() {
       term.textContent = state.logs.join('\n');
       term.scrollTop = term.scrollHeight;
     }
+    LAST_STATE = state;
     renderTables(state);
 
     if (!state.running && pollTimer) {
@@ -887,7 +1034,7 @@ function startPolling() {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  fetchCpuInfo();
+  initLang();  // also loads the CPU pills
   // Pre-fill example config if exists
   fetch('/api/defaults').then(r => r.json()).then(d => {
     if (d.default_config) document.getElementById('configPath').value = d.default_config;
@@ -993,43 +1140,51 @@ def handle_http_request(conn: socket.socket):
             req = json.loads(body_part.decode("utf-8") or "{}")
             target_file = Path(req.get("file", ""))
             popcnt = bool(req.get("popcnt", False))
+            lang = req.get("lang", "pt")
 
             def job_scan():
                 if not target_file.exists():
-                    raise FileNotFoundError(f"Arquivo não encontrado: {target_file}")
-                append_log(f"Escaneando {target_file.name}...")
+                    raise FileNotFoundError(tr(lang, f"Arquivo não encontrado: {target_file}", f"File not found: {target_file}"))
+                append_log(tr(lang, f"Escaneando {target_file.name}...", f"Scanning {target_file.name}..."))
                 res = fxkit.scan_binary_detailed(target_file, include_popcnt=popcnt)
                 with JOB_LOCK:
                     JOB_STATE["last_scan"] = res
                     JOB_STATE["last_build"] = None
-                append_log(
+                append_log(tr(
+                    lang,
                     f"Scan concluído: {res.get('total_sites', 0)} instruções encontradas "
-                    f"({res.get('translatable', 0)} traduzíveis). Por conjunto: {res.get('by_feature', {})}"
-                )
+                    f"({res.get('translatable', 0)} traduzíveis). Por conjunto: {res.get('by_feature', {})}",
+                    f"Scan finished: {res.get('total_sites', 0)} instructions found "
+                    f"({res.get('translatable', 0)} translatable). By set: {res.get('by_feature', {})}",
+                ))
 
-            run_async_job("Análise de Executável (Scan)", job_scan)
+            run_async_job(tr(lang, "Análise de Executável (Scan)", "Executable Analysis (Scan)"), job_scan, lang)
             send_json({"started": True})
             return
 
         if method == "POST" and path == "/api/gate":
             req = json.loads(body_part.decode("utf-8") or "{}")
             target_file = Path(req.get("file", ""))
+            lang = req.get("lang", "pt")
 
             def job_gate():
                 if not target_file.exists():
-                    raise FileNotFoundError(f"Arquivo não encontrado: {target_file}")
-                append_log(f"Procurando verificações de CPU (AVX2/FMA/F16C) em {target_file.name}...")
+                    raise FileNotFoundError(tr(lang, f"Arquivo não encontrado: {target_file}", f"File not found: {target_file}"))
+                append_log(tr(lang, f"Procurando verificações de CPU (AVX2/FMA/F16C) em {target_file.name}...",
+                              f"Looking for CPU checks (AVX2/FMA/F16C) in {target_file.name}..."))
                 gates = fxkit.detect_gates_detailed(target_file)
                 with JOB_LOCK:
                     JOB_STATE["last_gates"] = gates
                 if not gates:
-                    append_log("Nenhuma trava explícita de inicialização encontrada próxima a strings de erro.")
+                    append_log(tr(lang, "Nenhuma trava explícita de inicialização encontrada próxima a strings de erro.",
+                                  "No explicit startup check found next to error strings."))
                 else:
                     for g in gates:
-                        append_log(f"Trava detectada em {g['rva']} ({g['asm']}) perto de \"{g['string']}\"")
-                        append_log(f"Patch sugerido: {json.dumps(g['suggested_patch'])}")
+                        append_log(tr(lang, f"Trava detectada em {g['rva']} ({g['asm']}) perto de \"{g['string']}\"",
+                                      f"Check found at {g['rva']} ({g['asm']}) near \"{g['string']}\""))
+                        append_log(tr(lang, "Patch sugerido: ", "Suggested patch: ") + json.dumps(g['suggested_patch']))
 
-            run_async_job("Detecção de Trava de CPU (Gate)", job_gate)
+            run_async_job(tr(lang, "Detecção de Trava de CPU (Gate)", "CPU Check Detection (Gate)"), job_gate, lang)
             send_json({"started": True})
             return
 
@@ -1042,16 +1197,19 @@ def handle_http_request(conn: socket.socket):
             features = set(req.get("features") or fxkit.TRANSLATED_FEATURES)
             fusion = bool(req.get("fusion", True))
             neighbor_steal = bool(req.get("neighbor_steal", True))
+            lang = req.get("lang", "pt")
 
             def job_build():
                 if not target_file.exists():
-                    raise FileNotFoundError(f"Arquivo não encontrado: {target_file}")
+                    raise FileNotFoundError(tr(lang, f"Arquivo não encontrado: {target_file}", f"File not found: {target_file}"))
                 if target_file.parent.resolve() == out_dir.resolve():
-                    raise ValueError("Por segurança, escolha uma pasta de saída diferente da pasta onde está o arquivo original.")
+                    raise ValueError(tr(lang, "Por segurança, escolha uma pasta de saída diferente da pasta onde está o arquivo original.",
+                                        "For safety, choose an output folder different from the folder of the original file."))
                 config, cdir = fxkit.load_config(cfg_str if cfg_str and Path(cfg_str).exists() else None)
                 learned = fxkit.learned_from_log(Path(learned_str), target_file.name) if learned_str and Path(learned_str).exists() else []
                 include_popcnt = "POPCNT" in features
-                append_log(f"Selecionando/escaneando instruções em {target_file.name} (conjuntos: {sorted(features)})...")
+                append_log(tr(lang, f"Selecionando/escaneando instruções em {target_file.name} (conjuntos: {sorted(features)})...",
+                              f"Selecting/scanning instructions in {target_file.name} (sets: {sorted(features)})..."))
                 sites, kind, report = fxkit.choose_sites(
                     target_file, config, cdir, learned, force_scan=False, include_popcnt=include_popcnt
                 )
@@ -1061,8 +1219,10 @@ def handle_http_request(conn: socket.socket):
                 ]
                 patches = fxkit.locate_patches(target_file, specs) if specs else []
                 for p in patches:
-                    append_log(f"Patch aplicado '{p['name']}' em {p['rva']:#x}: {p['old']} -> {p['new']}")
-                append_log(f"Construindo executável otimizado para {len(sites)} locais ({kind})...")
+                    append_log(tr(lang, f"Patch aplicado '{p['name']}' em {p['rva']:#x}: {p['old']} -> {p['new']}",
+                                  f"Patch applied '{p['name']}' at {p['rva']:#x}: {p['old']} -> {p['new']}"))
+                append_log(tr(lang, f"Construindo executável otimizado para {len(sites)} locais ({kind})...",
+                              f"Building optimized executable for {len(sites)} sites ({kind})..."))
                 manifest = fxkit.build(
                     target_file, out_dir, sites, patches,
                     enabled_features=features,
@@ -1074,11 +1234,14 @@ def handle_http_request(conn: socket.socket):
                     shutil.copy2(rt, out_dir / "fxcompat.dll")
                 with JOB_LOCK:
                     JOB_STATE["last_build"] = manifest
-                append_log(f"SUCESSO! Arquivo gerado em: {out_dir / target_file.name}")
-                append_log(f"Estatísticas de métodos: {manifest.get('methods')}")
-                append_log("Copie o executável gerado E o arquivo fxcompat.dll para a pasta do jogo (faça backup do original!).")
+                append_log(tr(lang, f"SUCESSO! Arquivo gerado em: {out_dir / target_file.name}",
+                              f"SUCCESS! File written to: {out_dir / target_file.name}"))
+                append_log(tr(lang, f"Estatísticas de métodos: {manifest.get('methods')}",
+                              f"Method statistics: {manifest.get('methods')}"))
+                append_log(tr(lang, "Copie o executável gerado E o arquivo fxcompat.dll para a pasta do jogo (faça backup do original!).",
+                              "Copy the generated executable AND fxcompat.dll into the game folder (back up the original first!)."))
 
-            run_async_job("Construção de Executável Otimizado", job_build)
+            run_async_job(tr(lang, "Construção de Executável Otimizado", "Optimized Executable Build"), job_build, lang)
             send_json({"started": True})
             return
 

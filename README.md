@@ -1,3 +1,29 @@
+# FX Reborn Toolkit Ultra 3.0 — AVX2 / FMA3 / F16C / BMI emulation fix for old CPUs
+
+[🇺🇸 English](#fx-reborn-toolkit) · [🇧🇷 Português](#português) · [Guia completo em português](LEIA_ME_COMO_USAR.md)
+
+> **Game won't start or crashes with "illegal instruction" on an AMD FX or Intel 2nd/3rd gen (i7-2600, i5-2500K, i7-3770)?** This toolkit rewrites the game `.exe`/`.dll` so AVX2, FMA3, F16C, BMI1/BMI2, LZCNT and MOVBE instructions run on CPUs that only have AVX. Author's result on **Final Fantasy VII Rebirth** (i7-2600, 16 GB DDR3: ~30 FPS average, 75–85 FPS in calmer areas, with an RTX 2060 Super).
+>
+> **O jogo não abre ou fecha com "instrução ilegal" num AMD FX ou Intel de 2ª/3ª geração (i7-2600, i5-2500K, i7-3770)?** Este kit reescreve o `.exe`/`.dll` do jogo para que instruções AVX2, FMA3, F16C, BMI1/BMI2, LZCNT e MOVBE rodem em processadores que só têm AVX. Resultado do autor no **Final Fantasy VII Rebirth** (i7-2600, 16 GB DDR3: média de 30 FPS, 75–85 FPS em partes mais tranquilas, com RTX 2060 Super).
+
+The graphical interface is available in **English and Portuguese** (PT-BR / EN buttons at the top; it opens in your browser's language). / A interface gráfica está em **inglês e português** (botões PT-BR / EN no topo).
+
+## Português
+
+**Como usar (interface gráfica):**
+
+1. Dê dois cliques em **`Open- Iniciar_Interface_GUI.cmd`** (não precisa instalar nada: o Python já vem junto).
+2. Em **1**, escolha o `.exe` (ou `.dll`) do jogo e uma **pasta de saída diferente** da pasta do jogo.
+3. Em **2**, escolha o preset do seu processador (Intel 2ª geração, Intel 3ª geração ou AMD FX).
+4. Clique em **1. Analisar** para ver quantas instruções o jogo usa, e em **2. Detectar Trava de CPU** se o jogo recusa abrir com uma mensagem sobre AVX2.
+5. Clique em **⚡ 3. Gerar Executável** e copie o executável gerado **e** o `fxcompat.dll` para a pasta do jogo (faça backup do original antes).
+
+Se o jogo só exige **F16C** (por exemplo Ghost of Tsushima num i7-2600), use o projeto **FX-Reborn-F16C-Ultra**, que é mais simples. O guia completo, com todas as otimizações e correções da 3.0, está em [LEIA_ME_COMO_USAR.md](LEIA_ME_COMO_USAR.md).
+
+**Avisos:** não use em jogos online com anti-cheat (risco de banimento). Distribua só a ferramenta e as configurações, **nunca os executáveis do jogo**.
+
+---
+
 # FX Reborn Toolkit
 
 **Make AVX2-only PC games run on CPUs that only have AVX** (AMD FX, Piledriver-era APUs and similar). It's the engine behind [FX Reborn](https://www.nexusmods.com/finalfantasy7rebirth/mods/2477), the FINAL FANTASY VII REBIRTH mod that took an AMD FX-8350 from about **1 FPS under Intel SDE emulation to 30–85 FPS**, packaged so other modders can do the same for other games.
@@ -172,3 +198,11 @@ MIT (see `LICENSE`).
 - **Patrick McCoy (mcirish3):** project direction and testing.
 - **Code** was largely AI-generated (OpenAI Codex for FX Reborn v1–v6; Anthropic Claude for the update-proof patcher, this toolkit and the extra BMI2 lowerings), then tested locally on an FX-8350.
 - **Libraries:** iced-x86 and pefile (MIT). Python 3.13 (PSF license) is included in the release download.
+
+## Related projects / Projetos relacionados
+
+- **FX-Reborn-F16C-Ultra 3.0** — simpler tool for games that only need **F16C** (e.g. Ghost of Tsushima on Sandy Bridge). / Ferramenta mais simples para jogos que só exigem F16C.
+
+## Search terms / Termos de busca
+
+AVX2 emulator · AVX2 emulation · emulador AVX2 · run AVX2 game on AVX CPU · rodar jogo AVX2 em processador sem AVX2 · CPU does not support AVX2 · processador não suporta AVX2 · AVX2 fix · FMA3 emulation · F16C emulation · BMI2 emulation · Intel SDE alternative · alternativa ao Intel SDE · illegal instruction fix · instrução ilegal · 0xC000001D · Final Fantasy VII Rebirth AVX2 fix · FF7 Rebirth i7-2600 · FF7 Rebirth AMD FX · FX-8350 · FX-6300 · FX-8150 · i7-2600 · i5-2500K · i5-2400 · i7-3770 · Sandy Bridge · Ivy Bridge · Piledriver · Bulldozer · old CPU game mod · mod para processador antigo · jogo não abre · game won't start
